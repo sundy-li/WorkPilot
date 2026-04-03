@@ -24,6 +24,7 @@ export interface RuntimeRegistrationToken {
   createdBy: string;
   expiresAt: string;
   usedAt: string | null;
+  usedRuntimeKey: string | null;
 }
 
 export interface RuntimeDaemon {
@@ -338,7 +339,8 @@ export function createRuntimeRegistrationToken(
     token: createSecret("wpt"),
     createdBy: input.actorId,
     expiresAt: new Date(Date.parse(now) + ttlMs).toISOString(),
-    usedAt: null
+    usedAt: null,
+    usedRuntimeKey: null
   };
 
   workspace.registrationTokens.push(token);
@@ -363,7 +365,7 @@ export function registerRuntimeDaemon(
     throw new Error("Registration token is invalid.");
   }
 
-  if (token.usedAt) {
+  if (token.usedAt && token.usedRuntimeKey !== input.runtimeKey) {
     throw new Error("Registration token has already been used.");
   }
 
@@ -371,7 +373,18 @@ export function registerRuntimeDaemon(
     throw new Error("Registration token has expired.");
   }
 
+  const existingRuntime = workspace.runtimes.find(
+    (entry) => entry.runtimeKey === input.runtimeKey && entry.status !== "deleted"
+  );
+
+  if (existingRuntime) {
+    token.usedAt = token.usedAt ?? now;
+    token.usedRuntimeKey = token.usedRuntimeKey ?? input.runtimeKey;
+    return existingRuntime;
+  }
+
   token.usedAt = now;
+  token.usedRuntimeKey = input.runtimeKey;
 
   const runtime: RuntimeDaemon = {
     id: createId("rtm"),

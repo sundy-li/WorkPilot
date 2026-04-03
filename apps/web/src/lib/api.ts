@@ -106,6 +106,11 @@ interface ControlAgentInput extends AgentControlRequest {
   agentId: string;
 }
 
+interface EnsureAgentDirectChannelInput {
+  agentId: string;
+  userId: string;
+}
+
 export function createWorkPilotApiClient(options: CreateWorkPilotApiClientOptions) {
   return {
     async login(input: LoginInput) {
@@ -198,8 +203,8 @@ export function createWorkPilotApiClient(options: CreateWorkPilotApiClientOption
         })
       });
     },
-    async createRuntimeRegistrationCommand(actorId: string, actorRole: "owner" | "admin") {
-      return requestJson<RuntimeRegistrationCommand>(options, "/organizations/org_demo/runtime-registration-tokens", {
+    async createRuntimeRegistrationCommand(organizationId: string, actorId: string, actorRole: "owner" | "admin") {
+      return requestJson<RuntimeRegistrationCommand>(options, `/organizations/${organizationId}/runtime-registration-tokens`, {
         method: "POST",
         body: JSON.stringify({
           actorId,
@@ -222,6 +227,14 @@ export function createWorkPilotApiClient(options: CreateWorkPilotApiClientOption
           })
         }
       );
+    },
+    async ensureAgentDirectChannel(input: EnsureAgentDirectChannelInput) {
+      return requestJson<{ channel: ChannelSummary }>(options, `/agents/${input.agentId}/direct-channel`, {
+        method: "POST",
+        body: JSON.stringify({
+          userId: input.userId
+        })
+      });
     },
     async deleteRuntime(input: DeleteRuntimeInput) {
       return requestJson<{

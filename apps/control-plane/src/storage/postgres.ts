@@ -1,5 +1,4 @@
 import { SQL } from "bun";
-import { readFile } from "node:fs/promises";
 import type {
   AgentControlActionDTO,
   AgentIdentity,
@@ -11,6 +10,7 @@ import type {
   RuntimeIdentity,
   WorkspaceBootstrapPayload
 } from "@workpilot/shared";
+import { assertSafeIdentifier, readSchemaSql } from "./schema";
 import type {
   ControlPlaneStorage,
   CreateAgentInput,
@@ -283,9 +283,9 @@ export async function createPostgresControlPlaneStorage(
     },
     async registerRuntime(input) {
       const [tokenRow] = await sql<
-        Array<{ organization_id: string; expires_at: string; used_at: string | null }>
+        Array<{ organization_id: string; expires_at: string; used_at: string | null; used_runtime_key: string | null }>
       >`
-        select organization_id, expires_at, used_at
+        select organization_id, expires_at, used_at, used_runtime_key
         from runtime_registration_tokens
         where token = ${input.registrationToken}
         limit 1
@@ -294,7 +294,7 @@ export async function createPostgresControlPlaneStorage(
       if (!tokenRow) {
         throw new Error("Registration token is invalid.");
       }
-      if (tokenRow.used_at) {
+      if (tokenRow.used_at && tokenRow.used_runtime_key !== input.runtimeKey) {
         throw new Error("Registration token has already been used.");
       }
       if (Date.parse(tokenRow.expires_at) < Date.now()) {
@@ -302,28 +302,70 @@ export async function createPostgresControlPlaneStorage(
       }
 
       const now = new Date().toISOString();
-      const id = createId("rtm");
-      const credentialId = createSecret("cred");
+      return await sql.begin(async (transaction) => {
+        const [lockedToken] = await transaction<
+          Array<{ organization_id: string; expires_at: string; used_at: string | null; used_runtime_key: string | null }>
+        >`
+          select organization_id, expires_at, used_at, used_runtime_key
+          from runtime_registration_tokens
+          where token = ${input.registrationToken}
+          for update
+        `;
 
-      await sql.begin(async (transaction) => {
+        if (!lockedToken) {
+          throw new Error("Registration token is invalid.");
+        }
+        if (lockedToken.used_at && lockedToken.used_runtime_key !== input.runtimeKey) {
+          throw new Error("Registration token has already been used.");
+        }
+        if (Date.parse(lockedToken.expires_at) < Date.parse(now)) {
+          throw new Error("Registration token has expired.");
+        }
+
+        const [existingRuntime] = await transaction<
+          Array<{ id: string; name: string; status: string; credentialId: string; lastHeartbeatAt: string | null }>
+        >`
+          select
+            id,
+            name,
+            status,
+            credential_id as "credentialId",
+            last_heartbeat_at as "lastHeartbeatAt"
+          from runtime_daemons
+          where organization_id = ${lockedToken.organization_id}
+            and runtime_key = ${input.runtimeKey}
+            and status <> 'deleted'
+          limit 1
+        `;
+
         await transaction`
           update runtime_registration_tokens
-          set used_at = ${now}
+          set used_at = coalesce(used_at, ${now}),
+              used_runtime_key = coalesce(used_runtime_key, ${input.runtimeKey})
           where token = ${input.registrationToken}
         `;
-        await transaction`
-          insert into runtime_daemons (id, organization_id, name, runtime_key, status, credential_id, last_heartbeat_at, created_at)
-          values (${id}, ${tokenRow.organization_id}, ${input.runtimeName}, ${input.runtimeKey}, 'pending', ${credentialId}, null, ${now})
-        `;
-      });
 
-      return {
-        id,
-        name: input.runtimeName,
-        status: "pending",
-        credentialId,
-        lastHeartbeatAt: null
-      };
+        if (existingRuntime) {
+          return existingRuntime;
+        }
+
+        const id = createId("rtm");
+        const credentialId = createSecret("cred");
+        const [createdRuntime] = await transaction<
+          Array<{ id: string; name: string; status: string; credentialId: string; lastHeartbeatAt: string | null }>
+        >`
+          insert into runtime_daemons (id, organization_id, name, runtime_key, status, credential_id, last_heartbeat_at, created_at)
+          values (${id}, ${lockedToken.organization_id}, ${input.runtimeName}, ${input.runtimeKey}, 'pending', ${credentialId}, null, ${now})
+          returning
+            id,
+            name,
+            status,
+            credential_id as "credentialId",
+            last_heartbeat_at as "lastHeartbeatAt"
+        `;
+
+        return createdRuntime!;
+      });
     },
     async recordRuntimeHeartbeat(input) {
       const occurredAt = input.occurredAt ?? new Date().toISOString();
@@ -442,6 +484,64 @@ export async function createPostgresControlPlaneStorage(
         select * from created_agent
       `;
       return agent;
+    },
+    async ensureAgentDirectChannel(input) {
+      const [agent] = await sql<Array<{ id: string; organization_id: string; name: string }>>`
+        select id, organization_id, name
+        from agents
+        where id = ${input.agentId}
+          and status <> 'deleted'
+        limit 1
+      `;
+      if (!agent) {
+        throw new Error("Agent was not found.");
+      }
+
+      const [existingChannel] = await sql<Array<{ id: string; type: "direct"; name: string }>>`
+        select c.id, c.type, c.name
+        from channels c
+        join channel_participants user_participant
+          on user_participant.channel_id = c.id
+         and user_participant.participant_type = 'user'
+         and user_participant.participant_id = ${input.userId}
+        join channel_participants agent_participant
+          on agent_participant.channel_id = c.id
+         and agent_participant.participant_type = 'agent'
+         and agent_participant.participant_id = ${input.agentId}
+        where c.type = 'direct'
+        limit 1
+      `;
+
+      if (existingChannel) {
+        return {
+          ...existingChannel,
+          unreadCount: 0
+        };
+      }
+
+      const channelId = createId("dir");
+      const channelName = `${input.userId} x ${agent.name}`;
+      const [channel] = await sql<Array<{ id: string; type: "direct"; name: string }>>`
+        with created_channel as (
+          insert into channels (id, organization_id, type, name)
+          values (${channelId}, ${agent.organization_id}, 'direct', ${channelName})
+          returning id, type, name
+        ),
+        participants as (
+          insert into channel_participants (channel_id, participant_id, participant_type)
+          values
+            (${channelId}, ${input.userId}, 'user'),
+            (${channelId}, ${input.agentId}, 'agent')
+          on conflict (channel_id, participant_id, participant_type) do nothing
+          returning channel_id
+        )
+        select id, type, name from created_channel
+      `;
+
+      return {
+        ...channel,
+        unreadCount: 0
+      };
     },
     async controlAgent(input) {
       const [agentRow] = await sql<
@@ -985,9 +1085,14 @@ export async function createPostgresControlPlaneStorage(
             m.id as source_message_id,
             a.id as agent_id
           from messages m
-          join agents a on a.channel_id = m.channel_id
+          join channel_participants cp
+            on cp.channel_id = m.channel_id
+           and cp.participant_type = 'agent'
+          join agents a on a.id = cp.participant_id
+          join channels c on c.id = m.channel_id
           where a.runtime_id = ${input.runtimeId}
             and a.status = 'running'
+            and c.type = 'direct'
             and m.sender_type = 'user'
             and not exists (
               select 1
@@ -1109,9 +1214,9 @@ export async function createPostgresControlPlaneStorage(
       await sql.begin(async (transaction) => {
         const [createdMessage] = await transaction<MessageDTO[]>`
           insert into messages (id, organization_id, channel_id, sender_id, sender_type, content, attachments, created_at)
-          select ${createId("msg")}, organization_id, ${agent.channelId}, ${input.agentId}, 'agent', ${input.content}, '[]'::jsonb, ${occurredAt}
-          from agents
-          where id = ${input.agentId}
+          select ${createId("msg")}, m.organization_id, m.channel_id, ${input.agentId}, 'agent', ${input.content}, '[]'::jsonb, ${occurredAt}
+          from messages m
+          where m.id = ${input.sourceMessageId}
           returning id, channel_id as "channelId", content, attachments, sender_id as "senderId", sender_type as "senderType", created_at as "createdAt"
         `;
         response = createdMessage ?? null;
@@ -1136,17 +1241,6 @@ export function getRequiredDatabaseUrl(env: Record<string, string | undefined>) 
     throw new Error("DATABASE_URL is required for Postgres storage.");
   }
   return databaseUrl;
-}
-
-async function readSchemaSql() {
-  const schemaUrl = new URL("../../db/schema.sql", import.meta.url);
-  return readFile(schemaUrl, "utf8");
-}
-
-function assertSafeIdentifier(identifier: string) {
-  if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(identifier)) {
-    throw new Error(`Unsafe SQL identifier: ${identifier}`);
-  }
 }
 
 function createId(prefix: string) {

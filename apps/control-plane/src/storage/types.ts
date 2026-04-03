@@ -54,6 +54,11 @@ export interface CreateAgentInput {
   reasoningEffort?: "low" | "medium" | "high";
 }
 
+export interface EnsureAgentDirectChannelInput {
+  agentId: string;
+  userId: string;
+}
+
 export interface CreateMessageInput {
   channelId: string;
   content: string;
@@ -161,6 +166,7 @@ export interface ControlPlaneStorage {
     runtime: RuntimeIdentity | null;
   }>;
   createAgent(input: CreateAgentInput): Promise<AgentIdentity>;
+  ensureAgentDirectChannel(input: EnsureAgentDirectChannelInput): Promise<ChannelSummary>;
   controlAgent(input: ControlAgentInput): Promise<{
     agent: AgentIdentity | null;
     controlAction: AgentControlActionDTO | null;

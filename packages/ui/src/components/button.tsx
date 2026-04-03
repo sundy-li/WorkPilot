@@ -7,9 +7,9 @@ const buttonVariants = cva(
   {
     variants: {
       variant: {
-        primary: "border-neutral-950 bg-neutral-950 text-white shadow-[0_1px_2px_rgba(15,23,42,0.16)] hover:bg-neutral-800",
-        secondary: "border-neutral-200 bg-white text-neutral-950 shadow-[0_1px_2px_rgba(15,23,42,0.06)] hover:border-neutral-300 hover:bg-neutral-50",
-        ghost: "border-transparent bg-transparent text-neutral-600 shadow-none hover:bg-neutral-100 hover:text-neutral-950"
+        primary: "border-[var(--accent-strong)] bg-[var(--accent)] text-white shadow-[0_1px_2px_rgba(15,23,42,0.16)] hover:opacity-90",
+        secondary: "border-[var(--border)] bg-[var(--panel)] text-[var(--text-primary)] shadow-[0_1px_2px_rgba(15,23,42,0.06)] hover:border-[var(--border-strong)] hover:bg-[var(--panel-muted)]",
+        ghost: "border-transparent bg-transparent text-[var(--text-secondary)] shadow-none hover:bg-[var(--panel-muted)] hover:text-[var(--text-primary)]"
       },
       size: {
         default: "h-11",

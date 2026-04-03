@@ -148,6 +148,99 @@ describe("control-plane app", () => {
     expect(heartbeatPayload.runtime.status).toBe("online");
   });
 
+  test("allows the same runtime key to reuse a registration token across restarts", async () => {
+    const app = createControlPlaneApp();
+
+    const tokenResponse = await app.request("/organizations/org_demo/runtime-registration-tokens", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        actorId: "usr_admin",
+        actorRole: "admin"
+      })
+    });
+    const tokenPayload = (await tokenResponse.json()) as { token: string };
+
+    const firstResponse = await app.request("/runtime/register", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        registrationToken: tokenPayload.token,
+        runtimeName: "ops-runtime",
+        runtimeKey: "runtime_001"
+      })
+    });
+    const secondResponse = await app.request("/runtime/register", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        registrationToken: tokenPayload.token,
+        runtimeName: "ops-runtime-restart",
+        runtimeKey: "runtime_001"
+      })
+    });
+
+    expect(firstResponse.status).toBe(201);
+    expect(secondResponse.status).toBe(201);
+
+    const firstPayload = (await firstResponse.json()) as { runtime: { id: string; credentialId: string } };
+    const secondPayload = (await secondResponse.json()) as { runtime: { id: string; credentialId: string } };
+
+    expect(secondPayload.runtime.id).toBe(firstPayload.runtime.id);
+    expect(secondPayload.runtime.credentialId).toBe(firstPayload.runtime.credentialId);
+  });
+
+  test("rejects reusing a registration token for a different runtime key", async () => {
+    const app = createControlPlaneApp();
+
+    const tokenResponse = await app.request("/organizations/org_demo/runtime-registration-tokens", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        actorId: "usr_admin",
+        actorRole: "admin"
+      })
+    });
+    const tokenPayload = (await tokenResponse.json()) as { token: string };
+
+    await app.request("/runtime/register", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        registrationToken: tokenPayload.token,
+        runtimeName: "ops-runtime",
+        runtimeKey: "runtime_001"
+      })
+    });
+
+    const secondResponse = await app.request("/runtime/register", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        registrationToken: tokenPayload.token,
+        runtimeName: "intruder-runtime",
+        runtimeKey: "runtime_002"
+      })
+    });
+
+    expect(secondResponse.status).toBe(400);
+
+    const secondPayload = (await secondResponse.json()) as { error: string };
+    expect(secondPayload.error).toBe("Registration token has already been used.");
+  });
+
   test("creates multiple agents under a runtime daemon", async () => {
     const app = createControlPlaneApp();
 
@@ -736,7 +829,23 @@ describe("control-plane app", () => {
   test("claims direct-thread user messages and records agent replies", async () => {
     const app = createControlPlaneApp();
 
-    const messageResponse = await app.request("/channels/dir_admin_ops/messages", {
+    const directChannelResponse = await app.request("/agents/agt_seed/direct-channel", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        userId: "usr_admin"
+      })
+    });
+
+    expect(directChannelResponse.status).toBe(201);
+
+    const directChannelPayload = (await directChannelResponse.json()) as {
+      channel: { id: string };
+    };
+
+    const messageResponse = await app.request(`/channels/${directChannelPayload.channel.id}/messages`, {
       method: "POST",
       headers: {
         "content-type": "application/json"
@@ -777,7 +886,7 @@ describe("control-plane app", () => {
     expect(pullPayload.claims).toHaveLength(1);
     expect(pullPayload.claims[0]?.agent.id).toBe("agt_seed");
     expect(pullPayload.claims[0]?.sourceMessage.id).toBe(messagePayload.message.id);
-    expect(pullPayload.claims[0]?.sourceMessage.channelId).toBe("dir_admin_ops");
+    expect(pullPayload.claims[0]?.sourceMessage.channelId).toBe(directChannelPayload.channel.id);
 
     const respondResponse = await app.request("/agent/message-events", {
       method: "POST",
@@ -799,7 +908,52 @@ describe("control-plane app", () => {
 
     expect(respondPayload.message.senderId).toBe("agt_seed");
     expect(respondPayload.message.senderType).toBe("agent");
-    expect(respondPayload.message.channelId).toBe("dir_admin_ops");
+    expect(respondPayload.message.channelId).toBe(directChannelPayload.channel.id);
     expect(respondPayload.message.content).toContain("timed out");
+  });
+
+  test("creates isolated direct channels per user for the same agent", async () => {
+    const app = createControlPlaneApp();
+
+    const firstResponse = await app.request("/agents/agt_seed/direct-channel", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        userId: "usr_admin"
+      })
+    });
+    const secondResponse = await app.request("/agents/agt_seed/direct-channel", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        userId: "usr_member"
+      })
+    });
+    const repeatResponse = await app.request("/agents/agt_seed/direct-channel", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        userId: "usr_admin"
+      })
+    });
+
+    expect(firstResponse.status).toBe(201);
+    expect(secondResponse.status).toBe(201);
+    expect(repeatResponse.status).toBe(201);
+
+    const firstPayload = (await firstResponse.json()) as { channel: { id: string; type: string } };
+    const secondPayload = (await secondResponse.json()) as { channel: { id: string; type: string } };
+    const repeatPayload = (await repeatResponse.json()) as { channel: { id: string; type: string } };
+
+    expect(firstPayload.channel.type).toBe("direct");
+    expect(secondPayload.channel.type).toBe("direct");
+    expect(firstPayload.channel.id).not.toBe(secondPayload.channel.id);
+    expect(firstPayload.channel.id).toBe(repeatPayload.channel.id);
   });
 });

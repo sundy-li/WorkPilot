@@ -98,6 +98,34 @@ describe("workpilot api client", () => {
     expect(payload.agents.find((agent) => agent.id === "agt_seed")?.status).toBe("stopped");
   });
 
+  test("creates or reuses a direct channel for a user-agent thread", async () => {
+    const app = createControlPlaneApp({
+      controlPlaneUrl: "http://control-plane.local"
+    });
+
+    const client = createWorkPilotApiClient({
+      baseUrl: "http://control-plane.local",
+      fetcher: app.fetch
+    });
+
+    const first = await client.ensureAgentDirectChannel({
+      agentId: "agt_seed",
+      userId: "usr_admin"
+    });
+    const second = await client.ensureAgentDirectChannel({
+      agentId: "agt_seed",
+      userId: "usr_admin"
+    });
+    const other = await client.ensureAgentDirectChannel({
+      agentId: "agt_seed",
+      userId: "usr_member"
+    });
+
+    expect(first.channel.type).toBe("direct");
+    expect(first.channel.id).toBe(second.channel.id);
+    expect(first.channel.id).not.toBe(other.channel.id);
+  });
+
   test("creates a global issue through the control-plane", async () => {
     const app = createControlPlaneApp({
       controlPlaneUrl: "http://control-plane.local"
@@ -165,7 +193,7 @@ describe("workpilot api client", () => {
       fetcher: app.fetch
     });
 
-    const command = await client.createRuntimeRegistrationCommand("usr_admin", "admin");
+    const command = await client.createRuntimeRegistrationCommand("org_demo", "usr_admin", "admin");
     const registration = await app.request("/runtime/register", {
       method: "POST",
       headers: {
@@ -188,5 +216,34 @@ describe("workpilot api client", () => {
 
     expect(result.runtime?.id).toBe(registered.runtime.id);
     expect(result.runtime?.status).toBe("deleted");
+  });
+
+  test("creates a runtime registration command for the provided organization id", async () => {
+    let requestedPath = "";
+
+    const client = createWorkPilotApiClient({
+      baseUrl: "http://control-plane.local",
+      fetcher: async (request) => {
+        requestedPath = new URL(request.url).pathname;
+        return new Response(
+          JSON.stringify({
+            token: "wpt_demo",
+            expiresAt: "2025-01-01T00:15:00.000Z",
+            controlPlaneUrl: "http://control-plane.local",
+            installCommand: "bun run"
+          }),
+          {
+            status: 201,
+            headers: {
+              "content-type": "application/json"
+            }
+          }
+        );
+      }
+    });
+
+    await client.createRuntimeRegistrationCommand("org_custom", "usr_admin", "admin");
+
+    expect(requestedPath).toBe("/organizations/org_custom/runtime-registration-tokens");
   });
 });

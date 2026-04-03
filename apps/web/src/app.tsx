@@ -43,6 +43,7 @@ import {
   createComposerAttachmentDraftsFromFileList,
   type ComposerAttachmentDraft
 } from "./lib/composer-attachments";
+import { resolveConversationChannelId } from "./lib/conversation-channel";
 import { shouldSendMessageFromKeypress, shouldSubmitInlineDraftFromKeypress } from "./lib/composer";
 import {
   createInspectionRailModel,
@@ -54,7 +55,13 @@ import {
 import { closeDetailPanel, openDetailPanel, shouldShowExplorer, type DetailPanelState } from "./lib/layout-state";
 import { clearSelection, createSelectionState, toggleMessageSelection, type MessageSelectionState } from "./lib/message-selection";
 import { getMessageAttachments } from "./lib/message-attachments";
-import { buildRuntimeInstallCommand, findNewlyConnectedRuntime } from "./lib/runtime-connect";
+import { resolveMessageSenderDisplayName } from "./lib/message-presenter";
+import {
+  buildRuntimeInstallCommand,
+  createRuntimeConnectPanel,
+  findNewlyConnectedRuntime,
+  getRuntimeConnectStatusText
+} from "./lib/runtime-connect";
 import {
   createInitialShellState,
   getChannelDisplayName,
@@ -208,6 +215,7 @@ interface RuntimeDeleteDialogState {
 export function App() {
   const [credentials, setCredentials] = useState(initialCredentials);
   const [session, setSession] = useState<AuthSession | null>(null);
+  const [isSessionReady, setIsSessionReady] = useState(false);
   const [workspace, setWorkspace] = useState<WorkspaceBootstrapPayload | null>(null);
   const [centerView, setCenterView] = useState<CenterView>("chat");
   const [composerValue, setComposerValue] = useState("");
@@ -228,6 +236,7 @@ export function App() {
   const [activeAuthAction, setActiveAuthAction] = useState<AuthAction>("login");
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>("msg_seed");
   const [runtimeConnectPanel, setRuntimeConnectPanel] = useState<RuntimeConnectPanelState | null>(null);
+  const [runtimeConnectAutoCloseSeconds, setRuntimeConnectAutoCloseSeconds] = useState<number | null>(null);
   const [agentActionDialog, setAgentActionDialog] = useState<AgentActionDialogState | null>(null);
   const [runtimeDeleteDialog, setRuntimeDeleteDialog] = useState<RuntimeDeleteDialogState | null>(null);
   const [agentDraft, setAgentDraft] = useState<AgentDraft>(initialAgentDraft);
@@ -235,6 +244,7 @@ export function App() {
   const [isWorkspaceSwitcherOpen, setIsWorkspaceSwitcherOpen] = useState(false);
   const [isWorkspaceCreateOpen, setIsWorkspaceCreateOpen] = useState(false);
   const [workspaceDraftName, setWorkspaceDraftName] = useState("");
+  const [agentDirectChannelIds, setAgentDirectChannelIds] = useState<Record<string, string>>({});
   const [issueCreateDraft, setIssueCreateDraft] = useState<IssueCreateDraft>(() => initialIssueCreateDraft());
   const [isIssueCreateModalOpen, setIsIssueCreateModalOpen] = useState(false);
   const [draggingIssueId, setDraggingIssueId] = useState<string | null>(null);
@@ -282,31 +292,65 @@ export function App() {
   }, [themeMode]);
 
   useEffect(() => {
+    let cancelled = false;
+
+    void api
+      .getMe()
+      .then((response) => {
+        if (cancelled) {
+          return;
+        }
+
+        setSession(response.session);
+        setAccountName(response.session.email.split("@")[0] ?? "admin");
+        setAccountAvatarImage(null);
+        setAccountAvatarPaletteId(getAvatarPalette(response.session.email).id);
+        setAccountAvatarGlyphId(getAvatarGlyph(response.session.email));
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) {
+          setIsSessionReady(true);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     if (!session) {
       return;
     }
 
     let cancelled = false;
 
-    void api
-      .getWorkspaceBootstrap()
-      .then((payload) => {
-        if (cancelled) {
-          return;
-        }
+    async function refreshWorkspace() {
+      const payload = await api.getWorkspaceBootstrap();
 
-        startTransition(() => {
-          setWorkspace(payload);
-        });
-      })
-      .catch((loadError) => {
-        if (!cancelled) {
-          setError(loadError instanceof Error ? loadError.message : "Failed to load workspace.");
-        }
+      if (cancelled) {
+        return;
+      }
+
+      startTransition(() => {
+        setWorkspace(payload);
       });
+    }
+
+    void refreshWorkspace().catch((loadError) => {
+      if (!cancelled) {
+        setError(loadError instanceof Error ? loadError.message : "Failed to load workspace.");
+      }
+    });
+
+    const intervalId = window.setInterval(() => {
+      void refreshWorkspace().catch(() => {});
+    }, 2500);
 
     return () => {
       cancelled = true;
+      window.clearInterval(intervalId);
     };
   }, [session]);
 
@@ -427,10 +471,42 @@ export function App() {
     };
   }, [runtimeConnectPanel?.baselineRuntimeIds, runtimeConnectPanel?.connectedRuntimeId, runtimeConnectPanel?.isOpen, session]);
 
+  useEffect(() => {
+    if (!runtimeConnectPanel?.isOpen || !runtimeConnectPanel.connectedRuntimeId) {
+      setRuntimeConnectAutoCloseSeconds(null);
+      return;
+    }
+
+    setRuntimeConnectAutoCloseSeconds(5);
+
+    const startedAt = Date.now();
+    const intervalId = window.setInterval(() => {
+      const elapsedSeconds = Math.floor((Date.now() - startedAt) / 1000);
+      const remainingSeconds = Math.max(5 - elapsedSeconds, 0);
+
+      if (remainingSeconds <= 0) {
+        setRuntimeConnectAutoCloseSeconds(null);
+        setRuntimeConnectPanel(null);
+        window.clearInterval(intervalId);
+        return;
+      }
+
+      setRuntimeConnectAutoCloseSeconds(remainingSeconds);
+    }, 250);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [runtimeConnectPanel?.connectedRuntimeId, runtimeConnectPanel?.isOpen]);
+
   const selectedWorkspaceOption = workspaceOptions.find((option) => option.id === shellState.workspaceId) ?? workspaceOptions[0];
   const groupChannels = workspace?.channels.filter((channel) => channel.type === "group") ?? [];
   const activeAgent = shellState.activeTarget.kind === "agent" ? workspace?.agents.find((agent) => agent.id === shellState.activeTarget.id) ?? null : null;
-  const activeChannelId = resolveConversationChannelId(shellState.activeTarget, workspace);
+  const resolvedActiveChannelId = resolveConversationChannelId(shellState.activeTarget, workspace);
+  const activeChannelId =
+    shellState.activeTarget.kind === "agent"
+      ? agentDirectChannelIds[shellState.activeTarget.id] ?? resolvedActiveChannelId
+      : resolvedActiveChannelId;
   const activeChannel = workspace?.channels.find((channel) => channel.id === activeChannelId) ?? null;
   const workspaceIssues = workspace?.issues ?? [];
   const activeMessages = workspace?.messages.filter((message) => message.channelId === activeChannelId) ?? [];
@@ -443,7 +519,8 @@ export function App() {
   const selectedRuntimeWorkspace =
     workspace?.runtimes.find((runtime) => runtime.id === runtimeWorkspace.runtimeId) ?? workspace?.runtimes[0] ?? null;
   const selectedAgentWorkspaceChannelId = selectedAgentWorkspace
-    ? resolveConversationChannelId({ kind: "agent", id: selectedAgentWorkspace.id }, workspace)
+    ? agentDirectChannelIds[selectedAgentWorkspace.id] ??
+      resolveConversationChannelId({ kind: "agent", id: selectedAgentWorkspace.id }, workspace)
     : "";
   const selectedAgentWorkspaceRuntime = selectedAgentWorkspace
     ? workspace?.runtimes.find((runtime) => runtime.id === selectedAgentWorkspace.runtimeId) ?? null
@@ -525,6 +602,13 @@ export function App() {
       })
     : null;
   const isExplorerVisible = shouldShowExplorer(isExplorerOpen, shellState.primaryView);
+  const displayMessageSenderName = (message: Pick<MessageDTO, "senderId" | "senderType">) =>
+    resolveMessageSenderDisplayName({
+      message,
+      agents: workspace?.agents ?? [],
+      sessionUserId: session?.userId ?? "",
+      accountName
+    });
 
   useEffect(() => {
     if (!workspace) {
@@ -543,6 +627,30 @@ export function App() {
       return next;
     });
   }, [activeAgent?.runtimeId, selectedRuntimeId, workspace]);
+
+  useEffect(() => {
+    if (!session) {
+      return;
+    }
+
+    const targetAgentIds = new Set<string>();
+
+    if (shellState.activeTarget.kind === "agent") {
+      targetAgentIds.add(shellState.activeTarget.id);
+    }
+
+    if (selectedAgentWorkspace) {
+      targetAgentIds.add(selectedAgentWorkspace.id);
+    }
+
+    for (const agentId of targetAgentIds) {
+      if (agentDirectChannelIds[agentId]) {
+        continue;
+      }
+
+      void ensureAgentDirectChannel(agentId).catch(() => {});
+    }
+  }, [agentDirectChannelIds, selectedAgentWorkspace, session, shellState.activeTarget]);
 
   useEffect(() => {
     const previousCount = previousMessageCountRef.current;
@@ -568,6 +676,7 @@ export function App() {
     try {
       const response = await api.login(credentials);
       setSession(response.session);
+      setIsSessionReady(true);
       setAccountName(response.session.email.split("@")[0] ?? "admin");
       setAccountAvatarImage(null);
       setAccountAvatarPaletteId(getAvatarPalette(response.session.email).id);
@@ -617,6 +726,39 @@ export function App() {
     setDetailPanel((current) => closeDetailPanel(current));
   }
 
+  async function ensureAgentDirectChannel(agentId: string) {
+    if (!session) {
+      return "";
+    }
+
+    const cachedChannelId = agentDirectChannelIds[agentId];
+    if (cachedChannelId) {
+      return cachedChannelId;
+    }
+
+    const response = await api.ensureAgentDirectChannel({
+      agentId,
+      userId: session.userId
+    });
+
+    setAgentDirectChannelIds((current) => ({
+      ...current,
+      [agentId]: response.channel.id
+    }));
+    setWorkspace((current) =>
+      current
+        ? {
+            ...current,
+            channels: current.channels.some((channel) => channel.id === response.channel.id)
+              ? current.channels
+              : [...current.channels, response.channel]
+          }
+        : current
+    );
+
+    return response.channel.id;
+  }
+
   async function handleSendMessage() {
     if (!session || (!composerValue.trim() && composerAttachments.length === 0)) {
       return;
@@ -627,8 +769,14 @@ export function App() {
       return;
     }
 
+    const channelId =
+      shellState.activeTarget.kind === "agent" && activeAgent ? await ensureAgentDirectChannel(activeAgent.id) : activeChannelId;
+    if (!channelId) {
+      return;
+    }
+
     const response = await api.sendMessage({
-      channelId: activeChannelId,
+      channelId,
       content: composerValue.trim(),
       attachments: composerAttachments.map((attachment) => ({
         name: attachment.name,
@@ -669,7 +817,7 @@ export function App() {
     }
 
     const response = await api.sendMessage({
-      channelId: selectedAgentWorkspaceChannelId,
+      channelId: selectedAgentWorkspaceChannelId || (await ensureAgentDirectChannel(selectedAgentWorkspace.id)),
       content: composerValue.trim(),
       attachments: composerAttachments.map((attachment) => ({
         name: attachment.name,
@@ -738,22 +886,26 @@ export function App() {
 
     setIsCreateAgentModalOpen(false);
     const command = await api.createRuntimeRegistrationCommand(
+      session.organizationId,
       session.userId,
       session.role === "owner" ? "owner" : "admin"
     );
-    setRuntimeConnectPanel({
-      isOpen: true,
-      token: command.token,
-      expiresAt: command.expiresAt,
-      controlPlaneUrl: command.controlPlaneUrl,
-      mode: "source",
-      baselineRuntimeIds: workspace?.runtimes.map((runtime) => runtime.id) ?? [],
-      connectedRuntimeId: null,
-      copied: false
-    });
+    setRuntimeConnectPanel(
+      createRuntimeConnectPanel({
+        token: command.token,
+        expiresAt: command.expiresAt,
+        controlPlaneUrl: command.controlPlaneUrl,
+        baselineRuntimeIds: workspace?.runtimes.map((runtime) => runtime.id) ?? []
+      })
+    );
+  }
+
+  async function handleOpenRuntimeConnectPanel() {
+    await handleGenerateCommand();
   }
 
   function handleCloseRuntimeConnectPanel() {
+    setRuntimeConnectAutoCloseSeconds(null);
     setRuntimeConnectPanel(null);
   }
 
@@ -1001,6 +1153,7 @@ export function App() {
 
   function handleLogout() {
     setSession(null);
+    setIsSessionReady(true);
     setWorkspace(null);
     setComposerValue("");
     setComposerAttachments([]);
@@ -1016,6 +1169,7 @@ export function App() {
     setIsWorkspaceSwitcherOpen(false);
     setIsWorkspaceCreateOpen(false);
     setWorkspaceDraftName("");
+    setAgentDirectChannelIds({});
     setWorkspaceOptions(initialWorkspaceOptions);
     setIsChannelsCollapsed(false);
     setIsAgentsCollapsed(false);
@@ -1480,6 +1634,16 @@ export function App() {
       event.preventDefault();
       void handleSendAgentWorkspaceMessage();
     }
+  }
+
+  if (!isSessionReady) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-[radial-gradient(circle_at_top,_#ffffff_0%,_#eef4ff_58%,_#e2e8f0_100%)] px-6 py-10 text-neutral-950">
+        <div className="rounded-[1.5rem] border border-neutral-200 bg-white/85 px-6 py-5 text-sm font-medium text-neutral-600 shadow-[0_12px_40px_rgba(15,23,42,0.08)] backdrop-blur-sm">
+          Loading workspace...
+        </div>
+      </main>
+    );
   }
 
   if (!session) {
@@ -2086,9 +2250,10 @@ export function App() {
                           const tone = getActorTone(message.senderType);
                           const isSelected = detailPanel.kind === "message" && detailPanel.itemId === message.id;
                           const isMultiSelected = messageSelection.selectedIds.includes(message.id);
+                          const senderDisplayName = displayMessageSenderName(message);
 
                           return (
-                            <button
+                            <div
                               key={message.id}
                               className={`${getMessageSurfaceClass(tone, isSelected)} ${isMultiSelected ? "ring-2 ring-amber-300" : ""}`}
                               onContextMenu={(event) => handleMessageContextMenu(event, message.id)}
@@ -2101,7 +2266,8 @@ export function App() {
                                 setSelectedMessageId(message.id);
                                 handleOpenDetailPanel("message", message.id);
                               }}
-                              type="button"
+                              role="button"
+                              tabIndex={0}
                             >
                               <div className="flex items-start justify-between gap-3">
                                 <div className="flex min-w-0 flex-1 items-start gap-3 text-left">
@@ -2126,7 +2292,7 @@ export function App() {
                                           ? accountAvatarGlyphId
                                           : getAvatarGlyph(message.senderId)
                                       }
-                                      name={message.senderId === session.userId ? accountName : message.senderId}
+                                      name={senderDisplayName}
                                       paletteId={
                                         message.senderId === session.userId
                                           ? accountAvatarPaletteId
@@ -2138,7 +2304,7 @@ export function App() {
                                   <div className="min-w-0 flex-1">
                                     <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                                       <span className={tone === "agent" ? "font-mono text-[12.5px] font-semibold text-neutral-950" : "text-[13px] font-semibold text-neutral-900"}>
-                                        {message.senderId}
+                                        {senderDisplayName}
                                       </span>
                                       {tone === "agent" ? <StatusDot tone="success" /> : null}
                                       <span className="font-mono text-[11px] uppercase tracking-[0.16em] text-neutral-400">{message.senderType}</span>
@@ -2150,14 +2316,14 @@ export function App() {
                                       </div>
                                     ) : null}
                                     {message.content ? (
-                                      <p className={`mt-1.5 leading-6 ${tone === "agent" ? "font-mono text-[12.5px] text-neutral-800" : "text-[13px] text-neutral-700"}`}>
+                                      <p className={`mt-1.5 select-text whitespace-pre-wrap break-words leading-6 ${tone === "agent" ? "font-mono text-[12.5px] text-neutral-800" : "text-[13px] text-neutral-700"}`}>
                                         {message.content}
                                       </p>
                                     ) : null}
                                   </div>
                                 </div>
                               </div>
-                            </button>
+                            </div>
                           );
                         })
                       )}
@@ -2520,28 +2686,31 @@ export function App() {
                         <div className="flex flex-wrap items-center gap-2">
                           <button
                             aria-label="Stop agent"
-                            className="panel-control flex h-11 w-11 items-center justify-center rounded-xl border border-neutral-200 bg-white text-neutral-700 shadow-[0_8px_20px_rgba(15,23,42,0.06)] transition hover:border-neutral-300 hover:bg-neutral-50 disabled:cursor-not-allowed disabled:border-neutral-200 disabled:bg-neutral-100 disabled:text-neutral-300"
+                            className="flex h-10 items-center justify-center gap-2 rounded-[0.95rem] border border-[color:color-mix(in_srgb,var(--accent)_18%,white)] bg-[color:color-mix(in_srgb,var(--surface)_88%,white)] px-3 text-sm font-medium text-[var(--text-primary)] shadow-[0_8px_18px_rgba(15,23,42,0.05)] transition hover:border-[color:color-mix(in_srgb,var(--accent)_28%,white)] hover:bg-[color:color-mix(in_srgb,var(--accent-soft)_62%,white)] disabled:cursor-not-allowed disabled:border-neutral-200 disabled:bg-neutral-100 disabled:text-neutral-300"
                             disabled={selectedAgentWorkspace.status === "stopped"}
                             onClick={() => handleOpenLifecycleDialog("stopped", selectedAgentWorkspace)}
                             type="button"
                           >
                             <Square className="size-4" />
+                            <span>停止</span>
                           </button>
                           <button
                             aria-label="Reset agent"
-                            className="panel-control flex h-11 w-11 items-center justify-center rounded-xl border border-neutral-200 bg-white text-neutral-700 shadow-[0_8px_20px_rgba(15,23,42,0.06)] transition hover:border-neutral-300 hover:bg-neutral-50"
+                            className="flex h-10 items-center justify-center gap-2 rounded-[0.95rem] border border-[color:color-mix(in_srgb,var(--accent)_18%,white)] bg-[color:color-mix(in_srgb,var(--surface)_88%,white)] px-3 text-sm font-medium text-[var(--text-primary)] shadow-[0_8px_18px_rgba(15,23,42,0.05)] transition hover:border-[color:color-mix(in_srgb,var(--accent)_28%,white)] hover:bg-[color:color-mix(in_srgb,var(--accent-soft)_62%,white)]"
                             onClick={() => handleOpenRestartDialog(selectedAgentWorkspace)}
                             type="button"
                           >
                             <RotateCcw className="size-4" />
+                            <span>重置</span>
                           </button>
                           <button
                             aria-label="Delete agent"
-                            className="panel-control flex h-11 w-11 items-center justify-center rounded-xl border border-rose-200 bg-rose-50 text-rose-700 shadow-[0_8px_20px_rgba(244,63,94,0.10)] transition hover:border-rose-300 hover:bg-rose-100"
+                            className="flex h-10 items-center justify-center gap-2 rounded-[0.95rem] border border-[color:color-mix(in_srgb,#fb7185_34%,white)] bg-[color:color-mix(in_srgb,#ffe4e6_72%,white)] px-3 text-sm font-medium text-rose-700 shadow-[0_8px_18px_rgba(244,63,94,0.09)] transition hover:border-[color:color-mix(in_srgb,#fb7185_50%,white)] hover:bg-[color:color-mix(in_srgb,#ffe4e6_92%,white)]"
                             onClick={() => handleOpenDeleteDialog(selectedAgentWorkspace)}
                             type="button"
                           >
                             <Trash2 className="size-4" />
+                            <span>删除</span>
                           </button>
                         </div>
                       </div>
@@ -2682,16 +2851,18 @@ export function App() {
                               selectedAgentWorkspaceMessages.map((message) => {
                                 const tone = getActorTone(message.senderType);
                                 const isSelected = detailPanel.kind === "message" && detailPanel.itemId === message.id;
+                                const senderDisplayName = displayMessageSenderName(message);
 
                                 return (
-                                  <button
+                                  <div
                                     key={message.id}
                                     className={getMessageSurfaceClass(tone, isSelected)}
                                     onClick={() => {
                                       setSelectedMessageId(message.id);
                                       handleOpenDetailPanel("message", message.id);
                                     }}
-                                    type="button"
+                                    role="button"
+                                    tabIndex={0}
                                   >
                                     <div className="flex items-start justify-between gap-3">
                                       <div className="flex min-w-0 flex-1 items-start gap-3 text-left">
@@ -2707,7 +2878,7 @@ export function App() {
                                                 ? accountAvatarGlyphId
                                                 : getAvatarGlyph(message.senderId)
                                             }
-                                            name={message.senderId === session.userId ? accountName : message.senderId}
+                                            name={senderDisplayName}
                                             paletteId={
                                               message.senderId === session.userId
                                                 ? accountAvatarPaletteId
@@ -2719,7 +2890,7 @@ export function App() {
                                         <div className="min-w-0 flex-1">
                                           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                                             <span className={tone === "agent" ? "font-mono text-[12.5px] font-semibold text-neutral-950" : "text-[13px] font-semibold text-neutral-900"}>
-                                              {message.senderId}
+                                              {senderDisplayName}
                                             </span>
                                             {tone === "agent" ? <StatusDot tone="success" /> : null}
                                             <span className="font-mono text-[11px] uppercase tracking-[0.16em] text-neutral-400">
@@ -2733,14 +2904,14 @@ export function App() {
                                             </div>
                                           ) : null}
                                           {message.content ? (
-                                            <p className={`mt-1.5 leading-6 ${tone === "agent" ? "font-mono text-[12.5px] text-neutral-800" : "text-[13px] text-neutral-700"}`}>
+                                            <p className={`mt-1.5 select-text whitespace-pre-wrap break-words leading-6 ${tone === "agent" ? "font-mono text-[12.5px] text-neutral-800" : "text-[13px] text-neutral-700"}`}>
                                               {message.content}
                                             </p>
                                           ) : null}
                                         </div>
                                       </div>
                                     </div>
-                                  </button>
+                                  </div>
                                 );
                               })
                             )}
@@ -2845,6 +3016,10 @@ export function App() {
                               <Plus className="size-4" />
                               Create Agent
                             </Button>
+                            <Button onClick={() => void handleOpenRuntimeConnectPanel()} type="button" variant="ghost">
+                              <Sparkles className="size-4" />
+                              Connect Runtime
+                            </Button>
                             <Button
                               className="border-rose-200 text-rose-700 hover:bg-rose-50 hover:text-rose-800"
                               onClick={() => handleOpenRuntimeDeleteDialog(selectedRuntimeWorkspace.id)}
@@ -2858,7 +3033,7 @@ export function App() {
                               <FileText className="size-4" />
                               Open Inspector
                             </Button>
-                          <Button onClick={handleGenerateCommand} type="button" variant="ghost">
+                          <Button onClick={() => void handleGenerateCommand()} type="button" variant="ghost">
                             <Sparkles className="size-4" />
                             Add Runtime
                           </Button>
@@ -3097,6 +3272,11 @@ export function App() {
                 {detailPanel.kind === "message" && selectedMessage ? (
                   <>
                     <DetailCard accent="agent">
+                    {(() => {
+                      const senderDisplayName = displayMessageSenderName(selectedMessage);
+
+                      return (
+                        <>
                     <div className="flex items-center gap-3">
                       {selectedMessage.senderType === "agent" ? (
                         <div className={`${getActorAvatarClass(getActorTone(selectedMessage.senderType))} size-10`}>
@@ -3110,7 +3290,7 @@ export function App() {
                               ? accountAvatarGlyphId
                               : getAvatarGlyph(selectedMessage.senderId)
                           }
-                          name={selectedMessage.senderId === session.userId ? accountName : selectedMessage.senderId}
+                          name={senderDisplayName}
                           paletteId={
                             selectedMessage.senderId === session.userId
                               ? accountAvatarPaletteId
@@ -3121,7 +3301,7 @@ export function App() {
                       )}
                       <div>
                         <div className="flex items-center gap-2">
-                          <p className="font-medium">{selectedMessage.senderId}</p>
+                          <p className="font-medium">{senderDisplayName}</p>
                           {selectedMessage.senderType === "agent" ? <StatusDot tone="success" /> : null}
                         </div>
                         <p className="font-mono text-[11px] text-neutral-400">{formatTimestamp(selectedMessage.createdAt)}</p>
@@ -3133,10 +3313,13 @@ export function App() {
                       </div>
                     ) : null}
                     {selectedMessage.content ? (
-                      <p className={`mt-4 leading-7 ${selectedMessage.senderType === "agent" ? "font-mono text-[13.5px] text-neutral-800" : "text-sm text-neutral-700"}`}>
+                      <p className={`mt-4 select-text whitespace-pre-wrap break-words leading-7 ${selectedMessage.senderType === "agent" ? "font-mono text-[13.5px] text-neutral-800" : "text-sm text-neutral-700"}`}>
                         {selectedMessage.content}
                       </p>
                     ) : null}
+                        </>
+                      );
+                    })()}
                     </DetailCard>
 
                     <DetailCard>
@@ -3191,7 +3374,7 @@ export function App() {
                         selectedIssueSourceMessages.map((message) => (
                           <div key={message.id} className="rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-3">
                             <div className="flex items-center gap-2">
-                              <span className="text-sm font-medium text-neutral-900">{message.senderId}</span>
+                              <span className="text-sm font-medium text-neutral-900">{displayMessageSenderName(message)}</span>
                               <span className="font-mono text-[11px] text-neutral-400">{formatTimestamp(message.createdAt)}</span>
                             </div>
                             {getMessageAttachments(message.attachments).length > 0 ? (
@@ -3199,7 +3382,7 @@ export function App() {
                                 <MessageAttachmentGallery attachments={message.attachments} />
                               </div>
                             ) : null}
-                            {message.content ? <p className="mt-2 text-sm leading-6 text-neutral-700">{message.content}</p> : null}
+                            {message.content ? <p className="mt-2 select-text whitespace-pre-wrap break-words text-sm leading-6 text-neutral-700">{message.content}</p> : null}
                           </div>
                         ))
                       )}
@@ -3375,7 +3558,7 @@ export function App() {
               <div className="mt-6 grid gap-3">
                 <button
                   className="rounded-[1.2rem] border border-neutral-200 bg-white px-4 py-4 text-left transition hover:border-neutral-300 hover:bg-neutral-50"
-                  onClick={() => handleRestartAgent("restart")}
+                  onClick={() => void handleRestartAgent("restart", dialogAgent ?? undefined)}
                   type="button"
                 >
                   <p className="text-sm font-semibold text-neutral-950">Restart</p>
@@ -3383,7 +3566,7 @@ export function App() {
                 </button>
                 <button
                   className="rounded-[1.2rem] border border-neutral-200 bg-white px-4 py-4 text-left transition hover:border-neutral-300 hover:bg-neutral-50"
-                  onClick={() => handleRestartAgent("reset_session")}
+                  onClick={() => void handleRestartAgent("reset_session", dialogAgent ?? undefined)}
                   type="button"
                 >
                   <p className="text-sm font-semibold text-neutral-950">Reset Session, Keep Memory</p>
@@ -3391,7 +3574,7 @@ export function App() {
                 </button>
                 <button
                   className="rounded-[1.2rem] border border-rose-200 bg-rose-50 px-4 py-4 text-left transition hover:border-rose-300 hover:bg-rose-100"
-                  onClick={() => handleRestartAgent("full_reset")}
+                  onClick={() => void handleRestartAgent("full_reset", dialogAgent ?? undefined)}
                   type="button"
                 >
                   <p className="text-sm font-semibold text-rose-700">Full Reset</p>
@@ -3815,7 +3998,9 @@ export function App() {
                   }`}
                 />
                 <p className="text-lg font-semibold text-neutral-950">
-                  {connectedRuntime ? `${connectedRuntime.name} connected.` : "Waiting for runtime to connect..."}
+                  {connectedRuntime
+                    ? getRuntimeConnectStatusText(connectedRuntime.name, runtimeConnectAutoCloseSeconds)
+                    : "Waiting for runtime to connect..."}
                 </p>
               </div>
               <p className="mt-2 text-sm text-neutral-700">
@@ -4686,30 +4871,4 @@ function formatTimestamp(value: string) {
     hour: "numeric",
     minute: "2-digit"
   }).format(date);
-}
-
-function resolveConversationChannelId(
-  target: ShellState["activeTarget"],
-  workspace: WorkspaceBootstrapPayload | null
-) {
-  if (!workspace) {
-    return "";
-  }
-
-  if (target.kind === "channel") {
-    return target.id;
-  }
-
-  const agent = workspace.agents.find((entry) => entry.id === target.id);
-  const directChannels = workspace.channels.filter((channel) => channel.type === "direct");
-
-  if (!agent) {
-    return directChannels[0]?.id ?? workspace.channels[0]?.id ?? "";
-  }
-
-  const directMatch = directChannels.find((channel) =>
-    channel.name.toLowerCase().includes(agent.name.toLowerCase().split(" ")[0] ?? "")
-  );
-
-  return directMatch?.id ?? directChannels[0]?.id ?? workspace.channels.find((channel) => channel.id === "chn_general")?.id ?? "";
 }

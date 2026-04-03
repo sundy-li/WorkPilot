@@ -166,6 +166,10 @@ export function createDaemonRuntime(
       return;
     }
 
+    console.log("[daemon] sending heartbeat", {
+      runtimeId: state.runtimeId,
+      runtimeName: state.runtimeName
+    });
     await sendHeartbeat({
       controlPlaneUrl: config.controlPlaneUrl,
       fetcher: dependencies.fetcher,
@@ -184,6 +188,11 @@ export function createDaemonRuntime(
       }
 
       state = await resolveState();
+      console.log("[daemon] runtime started", {
+        runtimeId: state.runtimeId,
+        runtimeName: state.runtimeName,
+        controlPlaneUrl: config.controlPlaneUrl
+      });
 
       const host = await getAgentHost(state);
       await host.start();
@@ -213,6 +222,11 @@ export function createDaemonRuntime(
       const agents = bootstrap.agents
         .filter((agent) => agent.runtimeId === state?.runtimeId)
         .sort((left, right) => left.id.localeCompare(right.id));
+      console.log("[daemon] refresh agents", {
+        runtimeId: state.runtimeId,
+        count: agents.length,
+        agentIds: agents.map((agent) => agent.id)
+      });
       const signature = JSON.stringify(
         agents.map((agent) => ({
           id: agent.id,
@@ -255,6 +269,12 @@ export function createDaemonRuntime(
 
       const host = await getAgentHost(state);
 
+      console.log("[daemon] run agent prompt", {
+        runtimeId: state.runtimeId,
+        agentId,
+        agentName: agent.name,
+        promptLength: prompt.length
+      });
       return await host.run(agent, prompt);
     },
     async stop() {
@@ -282,9 +302,20 @@ export function createDaemonRuntime(
       fetcher: dependencies.fetcher,
       runtimeId: state.runtimeId
     });
+    console.log("[daemon] polled control actions", {
+      runtimeId: state.runtimeId,
+      count: response.actions.length
+    });
     const host = await getAgentHost(state);
 
     for (const action of response.actions) {
+      console.log("[daemon] applying control action", {
+        runtimeId: state.runtimeId,
+        actionId: action.id,
+        agentId: action.agentId,
+        action: action.action,
+        restartMode: action.restartMode ?? null
+      });
       if (action.action === "start" || action.action === "stop") {
         await host.setAgentStatus(action.agentId, action.action === "start" ? "running" : "stopped");
       } else if (action.action === "restart") {
@@ -312,6 +343,10 @@ export function createDaemonRuntime(
       runtimeId: state.runtimeId,
       limit: 10
     });
+    console.log("[daemon] polled issues", {
+      runtimeId: state.runtimeId,
+      count: response.claims.length
+    });
 
     for (const claim of response.claims) {
       await runIssueClaim(claim);
@@ -329,6 +364,10 @@ export function createDaemonRuntime(
       runtimeId: state.runtimeId,
       limit: 10
     });
+    console.log("[daemon] polled agent messages", {
+      runtimeId: state.runtimeId,
+      count: response.claims.length
+    });
 
     for (const claim of response.claims) {
       await runMessageClaim(claim);
@@ -337,8 +376,22 @@ export function createDaemonRuntime(
 
   async function runIssueClaim(claim: RuntimeIssueClaimDTO) {
     try {
+      console.log("[daemon] issue claim received", {
+        runtimeId: state?.runtimeId ?? null,
+        issueId: claim.issue.id,
+        title: claim.issue.title,
+        agentId: claim.agent.id,
+        agentName: claim.agent.name
+      });
       const result = await runtime.runAgentPrompt(claim.agent.id, buildIssuePrompt(claim));
 
+      console.log("[daemon] issue claim completed", {
+        runtimeId: state?.runtimeId ?? null,
+        issueId: claim.issue.id,
+        agentId: claim.agent.id,
+        sessionId: result.sessionId,
+        responseLength: result.responseText.length
+      });
       await sendIssueEvent({
         controlPlaneUrl: config.controlPlaneUrl,
         fetcher: dependencies.fetcher,
@@ -350,6 +403,12 @@ export function createDaemonRuntime(
           `Issue "${claim.issue.title}" completed in session ${result.sessionId} via ${result.implementationPackage}.`
       });
     } catch (error) {
+      console.error("[daemon] issue claim failed", {
+        runtimeId: state?.runtimeId ?? null,
+        issueId: claim.issue.id,
+        agentId: claim.agent.id,
+        error: error instanceof Error ? error.message : String(error)
+      });
       await sendIssueEvent({
         controlPlaneUrl: config.controlPlaneUrl,
         fetcher: dependencies.fetcher,
@@ -363,8 +422,24 @@ export function createDaemonRuntime(
 
   async function runMessageClaim(claim: RuntimeAgentMessageClaimDTO) {
     try {
+      console.log("[daemon] direct message claim received", {
+        runtimeId: state?.runtimeId ?? null,
+        agentId: claim.agent.id,
+        agentName: claim.agent.name,
+        sourceMessageId: claim.sourceMessage.id,
+        channelId: claim.sourceMessage.channelId,
+        senderId: claim.sourceMessage.senderId,
+        preview: claim.sourceMessage.content.slice(0, 120)
+      });
       const result = await runtime.runAgentPrompt(claim.agent.id, buildDirectMessagePrompt(claim));
 
+      console.log("[daemon] direct message completed", {
+        runtimeId: state?.runtimeId ?? null,
+        agentId: claim.agent.id,
+        sourceMessageId: claim.sourceMessage.id,
+        sessionId: result.sessionId,
+        responseLength: result.responseText.length
+      });
       await sendAgentMessageResponse({
         controlPlaneUrl: config.controlPlaneUrl,
         fetcher: dependencies.fetcher,
@@ -374,13 +449,29 @@ export function createDaemonRuntime(
           result.responseText.trim() ||
           `Completed response in session ${result.sessionId} via ${result.implementationPackage}.`
       });
+      console.log("[daemon] direct message response recorded", {
+        runtimeId: state?.runtimeId ?? null,
+        agentId: claim.agent.id,
+        sourceMessageId: claim.sourceMessage.id
+      });
     } catch (error) {
+      console.error("[daemon] direct message failed", {
+        runtimeId: state?.runtimeId ?? null,
+        agentId: claim.agent.id,
+        sourceMessageId: claim.sourceMessage.id,
+        error: error instanceof Error ? error.message : String(error)
+      });
       await sendAgentMessageResponse({
         controlPlaneUrl: config.controlPlaneUrl,
         fetcher: dependencies.fetcher,
         agentId: claim.agent.id,
         sourceMessageId: claim.sourceMessage.id,
         content: error instanceof Error ? error.message : "Agent message execution failed."
+      });
+      console.log("[daemon] direct message failure recorded", {
+        runtimeId: state?.runtimeId ?? null,
+        agentId: claim.agent.id,
+        sourceMessageId: claim.sourceMessage.id
       });
     }
   }

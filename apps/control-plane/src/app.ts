@@ -216,6 +216,24 @@ export function createControlPlaneApp(options: CreateControlPlaneAppOptions = {}
     }
   });
 
+  app.post("/agents/:agentId/direct-channel", async (context) => {
+    const body = (await context.req.json()) as {
+      userId: string;
+    };
+
+    try {
+      const channel = await storage.ensureAgentDirectChannel({
+        agentId: context.req.param("agentId"),
+        userId: body.userId
+      });
+      return context.json({ channel }, 201);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error.";
+      const status = message === "Agent was not found." ? 404 : 400;
+      return context.json({ error: message }, status);
+    }
+  });
+
   app.post("/agents/:agentId/control", async (context) => {
     const body = (await context.req.json()) as {
       action: "start" | "stop" | "restart" | "delete";

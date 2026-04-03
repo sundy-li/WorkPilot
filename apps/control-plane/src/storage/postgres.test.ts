@@ -80,6 +80,46 @@ describe("postgres control-plane storage", () => {
     });
   });
 
+  test("reuses a registration token for the same runtime key and rejects a different one", async () => {
+    const storage = await createPostgresControlPlaneStorage({
+      databaseUrl: process.env.DATABASE_URL ?? "postgres://sundy:sundy@127.0.0.1:5432/sundy",
+      schema: createTestSchemaName()
+    });
+    cleanupCallbacks.push(() => storage.dispose());
+
+    await storage.initialize();
+    await storage.seedDemoWorkspace();
+
+    const command = await storage.createRuntimeRegistrationCommand({
+      organizationId: "org_demo",
+      actorId: "usr_admin",
+      actorRole: "admin",
+      controlPlaneUrl: "http://localhost:3001"
+    });
+
+    const first = await storage.registerRuntime({
+      registrationToken: command.token,
+      runtimeName: "runtime-db",
+      runtimeKey: "runtime_db_001"
+    });
+    const second = await storage.registerRuntime({
+      registrationToken: command.token,
+      runtimeName: "runtime-db-restart",
+      runtimeKey: "runtime_db_001"
+    });
+
+    expect(second.id).toBe(first.id);
+    expect(second.credentialId).toBe(first.credentialId);
+
+    await expect(
+      storage.registerRuntime({
+        registrationToken: command.token,
+        runtimeName: "intruder-runtime",
+        runtimeKey: "runtime_db_002"
+      })
+    ).rejects.toThrow("Registration token has already been used.");
+  });
+
   test("persists agent control actions and issue claims in postgres", async () => {
     const storage = await createPostgresControlPlaneStorage({
       databaseUrl: process.env.DATABASE_URL ?? "postgres://sundy:sundy@127.0.0.1:5432/sundy",
@@ -192,6 +232,54 @@ describe("postgres control-plane storage", () => {
     expect(response.message.channelId).toBe("dir_admin_ops");
     expect(response.message.senderType).toBe("agent");
     expect(response.message.content).toContain("health-check");
+  });
+
+  test("creates isolated direct channels per user for the same agent in postgres", async () => {
+    const storage = await createPostgresControlPlaneStorage({
+      databaseUrl: process.env.DATABASE_URL ?? "postgres://sundy:sundy@127.0.0.1:5432/sundy",
+      schema: createTestSchemaName()
+    });
+    cleanupCallbacks.push(() => storage.dispose());
+
+    await storage.initialize();
+    await storage.seedDemoWorkspace();
+
+    const command = await storage.createRuntimeRegistrationCommand({
+      organizationId: "org_demo",
+      actorId: "usr_admin",
+      actorRole: "admin",
+      controlPlaneUrl: "http://localhost:3001"
+    });
+    const runtime = await storage.registerRuntime({
+      registrationToken: command.token,
+      runtimeName: "runtime-db",
+      runtimeKey: "runtime_db_threads"
+    });
+    const agent = await storage.createAgent({
+      runtimeId: runtime.id,
+      name: "Threaded Agent",
+      description: "Uses per-user direct channels.",
+      implementation: "codex",
+      model: "gpt-5.4",
+      reasoningEffort: "medium"
+    });
+
+    const first = await storage.ensureAgentDirectChannel({
+      agentId: agent.id,
+      userId: "usr_admin"
+    });
+    const second = await storage.ensureAgentDirectChannel({
+      agentId: agent.id,
+      userId: "usr_admin"
+    });
+    const other = await storage.ensureAgentDirectChannel({
+      agentId: agent.id,
+      userId: "usr_member"
+    });
+
+    expect(first.type).toBe("direct");
+    expect(first.id).toBe(second.id);
+    expect(first.id).not.toBe(other.id);
   });
 });
 

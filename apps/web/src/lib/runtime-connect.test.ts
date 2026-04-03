@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import type { RuntimeIdentity } from "@workpilot/shared";
-import { buildRuntimeInstallCommand, findNewlyConnectedRuntime } from "./runtime-connect";
+import {
+  buildRuntimeInstallCommand,
+  createRuntimeConnectPanel,
+  findNewlyConnectedRuntime,
+  getRuntimeConnectStatusText
+} from "./runtime-connect";
 
 describe("runtime connect", () => {
   test("builds an npx install command by default", () => {
@@ -48,5 +53,29 @@ describe("runtime connect", () => {
     ];
 
     expect(findNewlyConnectedRuntime(["rtm_seed"], runtimes)?.id).toBe("rtm_host");
+  });
+
+  test("creates a connect runtime panel model from a registration command", () => {
+    expect(
+      createRuntimeConnectPanel({
+        token: "wpt_demo",
+        expiresAt: "2025-01-01T00:15:00.000Z",
+        controlPlaneUrl: "http://localhost:3001",
+        baselineRuntimeIds: ["rtm_seed"]
+      })
+    ).toEqual({
+      isOpen: true,
+      token: "wpt_demo",
+      expiresAt: "2025-01-01T00:15:00.000Z",
+      controlPlaneUrl: "http://localhost:3001",
+      mode: "source",
+      baselineRuntimeIds: ["rtm_seed"],
+      connectedRuntimeId: null,
+      copied: false
+    });
+  });
+
+  test("formats connected runtime auto-close status text", () => {
+    expect(getRuntimeConnectStatusText("m1max.local", 5)).toBe("m1max.local connected. (closing window in 5s)");
   });
 });

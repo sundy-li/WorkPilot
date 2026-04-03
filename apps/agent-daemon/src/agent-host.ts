@@ -147,21 +147,38 @@ export function createSandboxAgentHost(options: SandboxAgentHostOptions): Daemon
     const existing = sessionsByAgentId.get(agent.id);
 
     if (existing) {
+      console.log("[agent-host] reusing session", {
+        agentId: agent.id,
+        agentName: agent.name,
+        sessionId: existing.id
+      });
       return existing;
     }
 
+    console.log("[agent-host] creating session", {
+      agentId: agent.id,
+      agentName: agent.name,
+      sessionAgentId,
+      model: agent.model,
+      implementation: agent.implementation
+    });
     const created = await withTimeout(
       (await ensureSandbox()).createSession({
         agent: sessionAgentId,
         cwd: join(runtimeRoot, agent.id),
         model: agent.model,
-        mode: agent.implementation === "codex" ? "default" : undefined
+        mode: agent.implementation === "codex" ? "auto" : undefined
       }),
       options.sessionCreateTimeoutMs ?? 30_000,
       `Timed out creating sandbox-agent session for ${agent.name}.`
     );
 
     sessionsByAgentId.set(agent.id, created);
+    console.log("[agent-host] session created", {
+      agentId: agent.id,
+      agentName: agent.name,
+      sessionId: created.id
+    });
 
     return created;
   }
@@ -243,6 +260,11 @@ export function createSandboxAgentHost(options: SandboxAgentHostOptions): Daemon
       }
 
       await disposeSession(agentId);
+      console.log("[agent-host] restart agent", {
+        agentId,
+        agentName: agent.name,
+        mode: mode ?? "restart"
+      });
 
       const agentRoot = join(runtimeRoot, agentId);
 
@@ -268,6 +290,10 @@ export function createSandboxAgentHost(options: SandboxAgentHostOptions): Daemon
       );
     },
     async deleteAgent(agentId) {
+      console.log("[agent-host] delete agent", {
+        agentId,
+        agentName: agentsById.get(agentId)?.name ?? null
+      });
       await disposeSession(agentId);
       agentsById.delete(agentId);
       stoppedAgentIds.delete(agentId);
@@ -288,6 +314,11 @@ export function createSandboxAgentHost(options: SandboxAgentHostOptions): Daemon
       const sessionAgentId = getSessionAgentId(agent);
 
       if (!installedAgentPackages.has(sessionAgentId)) {
+        console.log("[agent-host] installing agent package", {
+          agentId: agent.id,
+          agentName: agent.name,
+          sessionAgentId
+        });
         await (await ensureSandbox()).installAgent(sessionAgentId);
         installedAgentPackages.add(sessionAgentId);
       }
@@ -299,17 +330,42 @@ export function createSandboxAgentHost(options: SandboxAgentHostOptions): Daemon
 
         if (chunk) {
           responseText += chunk;
+          console.log("[agent-host] response chunk", {
+            agentId: agent.id,
+            agentName: agent.name,
+            sessionId: session.id,
+            chunkLength: chunk.length,
+            totalLength: responseText.length
+          });
         }
       });
       const unsubscribePermission = session.onPermissionRequest?.(async (request: { id: string }) => {
+        console.log("[agent-host] auto-approving permission", {
+          agentId: agent.id,
+          agentName: agent.name,
+          sessionId: session.id,
+          requestId: request.id
+        });
         await session.respondPermission?.(request.id, "always");
       });
       try {
+        console.log("[agent-host] prompt start", {
+          agentId: agent.id,
+          agentName: agent.name,
+          sessionId: session.id,
+          promptLength: prompt.length
+        });
         await withTimeout(
           session.prompt([{ type: "text", text: prompt }]),
           options.promptTimeoutMs ?? 300_000,
           `Timed out waiting for ${agent.name} to respond.`
         );
+        console.log("[agent-host] prompt complete", {
+          agentId: agent.id,
+          agentName: agent.name,
+          sessionId: session.id,
+          responseLength: responseText.length
+        });
       } finally {
         unsubscribe?.();
         unsubscribePermission?.();

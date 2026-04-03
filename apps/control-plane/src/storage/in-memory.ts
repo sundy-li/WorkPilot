@@ -1,6 +1,5 @@
 import {
   acknowledgeAgentControlAction,
-  claimRuntimeAgentMessages,
   claimRuntimeIssues,
   createAgentProfile,
   createIssue,
@@ -11,7 +10,6 @@ import {
   createWorkspaceSnapshot,
   queueAgentControlAction,
   softDeleteRuntimeDaemon,
-  recordAgentMessageResponse,
   recordAgentIssueEvent,
   recordRuntimeHeartbeat,
   registerRuntimeDaemon,
@@ -24,6 +22,7 @@ import {
 import type {
   ControlPlaneStorage,
   CreateAgentInput,
+  EnsureAgentDirectChannelInput,
   CreateIssueFromMessagesInput,
   CreateIssueFromMessageInput,
   CreateIssueInput,
@@ -36,6 +35,7 @@ import type {
 export function createInMemoryControlPlaneStorage(): ControlPlaneStorage {
   const workspaces = createSeedState();
   const channelsByOrganization = createSeedChannels();
+  const channelParticipantsByOrganization = createSeedChannelParticipants();
   const demoSession: AuthSession = {
     userId: "usr_admin",
     organizationId: "org_demo",
@@ -179,15 +179,64 @@ export function createInMemoryControlPlaneStorage(): ControlPlaneStorage {
         throw new Error("Runtime daemon was not found.");
       }
       const channels = channelsByOrganization.get(workspace.organization.id) ?? [];
+      const participants = channelParticipantsByOrganization.get(workspace.organization.id) ?? [];
       const channel = createDirectChannelForAgent(channels, input.name);
       channelsByOrganization.set(workspace.organization.id, [...channels, channel]);
       const agent = createAgentProfile(workspace, {
         ...input,
         channelId: channel.id
       });
+      channelParticipantsByOrganization.set(workspace.organization.id, [
+        ...participants,
+        { channelId: channel.id, participantId: "usr_admin", participantType: "user" },
+        { channelId: channel.id, participantId: agent.id, participantType: "agent" }
+      ]);
       return {
         ...toAgentIdentity(agent)
       };
+    },
+    async ensureAgentDirectChannel(input: EnsureAgentDirectChannelInput) {
+      const workspace = findWorkspaceByAgentId(workspaces, input.agentId);
+      if (!workspace) {
+        throw new Error("Agent was not found.");
+      }
+
+      const channels = channelsByOrganization.get(workspace.organization.id) ?? [];
+      const participants = channelParticipantsByOrganization.get(workspace.organization.id) ?? [];
+      const existing = channels.find((channel) => {
+        if (channel.type !== "direct") {
+          return false;
+        }
+
+        const channelParticipants = participants.filter((participant) => participant.channelId === channel.id);
+        return (
+          channelParticipants.some(
+            (participant) => participant.participantType === "user" && participant.participantId === input.userId
+          ) &&
+          channelParticipants.some(
+            (participant) => participant.participantType === "agent" && participant.participantId === input.agentId
+          )
+        );
+      });
+
+      if (existing) {
+        return existing;
+      }
+
+      const agent = workspace.agents.find((entry) => entry.id === input.agentId);
+      if (!agent) {
+        throw new Error("Agent was not found.");
+      }
+
+      const channel = createDirectChannelForUserAndAgent(channels, input.userId, agent.name);
+      channelsByOrganization.set(workspace.organization.id, [...channels, channel]);
+      channelParticipantsByOrganization.set(workspace.organization.id, [
+        ...participants,
+        { channelId: channel.id, participantId: input.userId, participantType: "user" },
+        { channelId: channel.id, participantId: input.agentId, participantType: "agent" }
+      ]);
+
+      return channel;
     },
     async controlAgent(input) {
       const workspace = findWorkspaceByAgentId(workspaces, input.agentId);
@@ -323,23 +372,89 @@ export function createInMemoryControlPlaneStorage(): ControlPlaneStorage {
       if (!workspace) {
         return [];
       }
+      const channels = channelsByOrganization.get(workspace.organization.id) ?? [];
+      const participants = channelParticipantsByOrganization.get(workspace.organization.id) ?? [];
+      const claimedSourceMessageIds = new Set(workspace.agentMessageClaims.map((claim) => claim.sourceMessageId));
+      const runtimeAgents = workspace.agents.filter((agent) => agent.runtimeId === input.runtimeId && agent.status === "running");
+      const runtimeAgentsById = new Map(runtimeAgents.map((agent) => [agent.id, agent]));
+      const directChannelIds = new Set(channels.filter((channel) => channel.type === "direct").map((channel) => channel.id));
+      const claims = workspace.messages
+        .filter(
+          (message) =>
+            message.senderType === "user" &&
+            directChannelIds.has(message.channelId) &&
+            !claimedSourceMessageIds.has(message.id)
+        )
+        .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt))
+        .slice(0, input.limit ?? 20)
+        .flatMap((message) => {
+          const agentParticipant = participants.find(
+            (participant) =>
+              participant.channelId === message.channelId &&
+              participant.participantType === "agent" &&
+              runtimeAgentsById.has(participant.participantId)
+          );
+          if (!agentParticipant) {
+            return [];
+          }
+          const agent = runtimeAgentsById.get(agentParticipant.participantId);
+          if (!agent) {
+            return [];
+          }
 
-      return claimRuntimeAgentMessages(workspace, {
-        runtimeId: input.runtimeId,
-        limit: input.limit,
-        now: input.occurredAt
-      }).map((claim) => ({
-        agent: toAgentIdentity(claim.agent),
-        sourceMessage: toMessageDto(claim.sourceMessage)
-      }));
+          workspace.agentMessageClaims.push({
+            id: `amc_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`,
+            organizationId: workspace.organization.id,
+            runtimeId: input.runtimeId,
+            agentId: agent.id,
+            sourceMessageId: message.id,
+            claimedAt: input.occurredAt ?? new Date().toISOString(),
+            respondedAt: null,
+            responseMessageId: null
+          });
+
+          return [
+            {
+              agent: toAgentIdentity(agent),
+              sourceMessage: toMessageDto(message)
+            }
+          ];
+        });
+
+      return claims;
     },
     async recordAgentMessageResponse(input) {
       const workspace = findWorkspaceByMessageId(workspaces, input.sourceMessageId);
       if (!workspace) {
         throw new Error("Source message was not found.");
       }
+      const agent = workspace.agents.find((entry) => entry.id === input.agentId);
+      const claim = workspace.agentMessageClaims.find(
+        (entry) => entry.agentId === input.agentId && entry.sourceMessageId === input.sourceMessageId
+      );
+      const sourceMessage = workspace.messages.find((entry) => entry.id === input.sourceMessageId);
 
-      const message = recordAgentMessageResponse(workspace, input);
+      if (!agent) {
+        throw new Error("Agent was not found.");
+      }
+
+      if (!claim) {
+        throw new Error("Agent message claim was not found.");
+      }
+
+      if (!sourceMessage) {
+        throw new Error("Source message was not found.");
+      }
+
+      const message = createMessage(workspace, {
+        channelId: sourceMessage.channelId,
+        content: input.content,
+        senderId: agent.id,
+        senderType: "agent",
+        now: input.occurredAt
+      });
+      claim.respondedAt = input.occurredAt ?? new Date().toISOString();
+      claim.responseMessageId = message.id;
 
       return {
         message: toMessageDto(message)
@@ -347,6 +462,12 @@ export function createInMemoryControlPlaneStorage(): ControlPlaneStorage {
     }
   };
 }
+
+type ChannelParticipant = {
+  channelId: string;
+  participantId: string;
+  participantType: "user" | "agent";
+};
 
 function toIssueDto(issue: WorkspaceSnapshot["issues"][number]) {
   return {
@@ -502,6 +623,18 @@ function createSeedChannels(): Map<string, ChannelSummary[]> {
   ]);
 }
 
+function createSeedChannelParticipants(): Map<string, ChannelParticipant[]> {
+  return new Map([
+    [
+      "org_demo",
+      [
+        { channelId: "dir_admin_ops", participantId: "usr_admin", participantType: "user" },
+        { channelId: "dir_admin_ops", participantId: "agt_seed", participantType: "agent" }
+      ]
+    ]
+  ]);
+}
+
 function requireWorkspace(workspaces: Map<string, WorkspaceSnapshot>, orgId: string): WorkspaceSnapshot {
   const workspace = workspaces.get(orgId);
   if (!workspace) {
@@ -614,6 +747,37 @@ function createDirectChannelForAgent(existingChannels: ChannelSummary[], agentNa
     id,
     type: "direct",
     name: `Ada x ${agentName}`,
+    unreadCount: 0
+  };
+}
+
+function createDirectChannelForUserAndAgent(
+  existingChannels: ChannelSummary[],
+  userId: string,
+  agentName: string
+): ChannelSummary {
+  const userSlug = userId
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 24);
+  const agentSlug = agentName
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 24);
+  let id = `dir_${userSlug || "user"}_${agentSlug || "agent"}`;
+  let suffix = 1;
+
+  while (existingChannels.some((channel) => channel.id === id)) {
+    suffix += 1;
+    id = `dir_${userSlug || "user"}_${agentSlug || "agent"}_${suffix}`;
+  }
+
+  return {
+    id,
+    type: "direct",
+    name: `${userId} x ${agentName}`,
     unreadCount: 0
   };
 }

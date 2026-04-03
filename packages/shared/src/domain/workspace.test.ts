@@ -71,6 +71,57 @@ describe("workspace domain", () => {
     expect(workspace.runtimes[0]?.status).toBe("offline");
   });
 
+  test("allows the same runtime key to reuse a registration token on restart", () => {
+    const workspace = createWorkspaceSnapshot({
+      organizationId: "org_123"
+    });
+
+    const token = createRuntimeRegistrationToken(workspace, {
+      actorId: "usr_admin",
+      actorRole: "admin"
+    });
+
+    const firstRuntime = registerRuntimeDaemon(workspace, {
+      registrationToken: token.token,
+      runtimeName: "ops-runtime",
+      runtimeKey: "runtime_001"
+    });
+    const secondRuntime = registerRuntimeDaemon(workspace, {
+      registrationToken: token.token,
+      runtimeName: "ops-runtime-restart",
+      runtimeKey: "runtime_001"
+    });
+
+    expect(secondRuntime.id).toBe(firstRuntime.id);
+    expect(secondRuntime.credentialId).toBe(firstRuntime.credentialId);
+    expect(workspace.runtimes).toHaveLength(1);
+  });
+
+  test("rejects reusing a registration token for a different runtime key", () => {
+    const workspace = createWorkspaceSnapshot({
+      organizationId: "org_123"
+    });
+
+    const token = createRuntimeRegistrationToken(workspace, {
+      actorId: "usr_admin",
+      actorRole: "admin"
+    });
+
+    registerRuntimeDaemon(workspace, {
+      registrationToken: token.token,
+      runtimeName: "ops-runtime",
+      runtimeKey: "runtime_001"
+    });
+
+    expect(() =>
+      registerRuntimeDaemon(workspace, {
+        registrationToken: token.token,
+        runtimeName: "other-runtime",
+        runtimeKey: "runtime_002"
+      })
+    ).toThrow("Registration token has already been used.");
+  });
+
   test("allows a runtime daemon to host multiple agents with name and description prompts", () => {
     const workspace = createWorkspaceSnapshot({
       organizationId: "org_123"

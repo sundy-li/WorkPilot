@@ -252,7 +252,7 @@ describe("sandbox agent host", () => {
       {
         cwd: join(workspaceRoot, "rtm_demo", "agt_codex"),
         model: "gpt-5.4",
-        mode: "default",
+        mode: "auto",
         agent: "codex"
       }
     ]);
@@ -440,7 +440,7 @@ describe("sandbox agent host", () => {
         agent: "codex",
         cwd: join(workspaceRoot, "rtm_demo", "agt_codex"),
         model: "gpt-5.4",
-        mode: "default"
+        mode: "auto"
       }
     ]);
     expect(promptCalls).toEqual(["First prompt", "Second prompt"]);
