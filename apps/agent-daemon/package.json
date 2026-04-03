@@ -1,0 +1,21 @@
+{
+  "name": "@workpilot/agent-daemon",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch src/index.ts",
+    "start": "bun src/index.ts",
+    "typecheck": "bunx tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@rivet-dev/agent-os-pi": "0.1.0",
+    "@sandbox-agent/cli": "0.4.2",
+    "@workpilot/shared": "workspace:*",
+    "sandbox-agent": "0.4.2"
+  },
+  "devDependencies": {
+    "bun-types": "^1.3.5",
+    "typescript": "^5.7.3"
+  }
+}
