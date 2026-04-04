@@ -11,6 +11,7 @@ const runtime: RuntimeIdentity = {
 const agent: AgentIdentity = {
   id: "agt_release",
   runtimeId: runtime.id,
+  channelId: "dir_release",
   name: "Release Analyst",
   description: "Tracks release quality and summarizes regressions.",
   implementation: "codex",

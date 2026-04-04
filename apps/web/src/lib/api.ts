@@ -1,4 +1,5 @@
 import type {
+  AgentActivityDTO,
   AgentControlRequest,
   AuthSession,
   ChannelSummary,
@@ -36,6 +37,7 @@ interface SendMessageInput {
   }>;
   senderId: string;
   senderType: "user" | "agent" | "system";
+  occurredAt?: string;
 }
 
 interface CreateChannelInput {
@@ -128,8 +130,22 @@ export function createWorkPilotApiClient(options: CreateWorkPilotApiClientOption
     async getMe() {
       return requestJson<{ session: AuthSession }>(options, "/me");
     },
-    async getWorkspaceBootstrap() {
-      return requestJson<WorkspaceBootstrapPayload>(options, "/bootstrap/workspace");
+    async getWorkspaceBootstrap(organizationId: string) {
+      return requestJson<WorkspaceBootstrapPayload>(options, `/bootstrap/workspace?organizationId=${encodeURIComponent(organizationId)}`);
+    },
+    async getChannelMessages(channelId: string, input?: { after?: string; organizationId?: string }) {
+      const params = new URLSearchParams();
+      if (input?.after) {
+        params.set("after", input.after);
+      }
+      if (input?.organizationId) {
+        params.set("organizationId", input.organizationId);
+      }
+      const search = params.toString() ? `?${params.toString()}` : "";
+      return requestJson<{ messages: MessageDTO[]; agentActivities: AgentActivityDTO[] }>(
+        options,
+        `/channels/${channelId}/messages${search}`
+      );
     },
     async getRuntimes(orgId: string) {
       return requestJson<{ runtimes: WorkspaceBootstrapPayload["runtimes"] }>(options, `/organizations/${orgId}/runtimes`);
@@ -150,7 +166,8 @@ export function createWorkPilotApiClient(options: CreateWorkPilotApiClientOption
           content: input.content,
           attachments: input.attachments ?? [],
           senderId: input.senderId,
-          senderType: input.senderType
+          senderType: input.senderType,
+          occurredAt: input.occurredAt
         })
       });
     },

@@ -94,6 +94,28 @@ class ManualScheduler implements DaemonRuntimeScheduler {
   }
 }
 
+class RecordingAgentActivityReporter {
+  readonly calls: Array<{
+    agentId: string;
+    status: "idle" | "running";
+    summary: string;
+    detail?: string;
+  }> = [];
+
+  async record(input: { agentId: string; status: "idle" | "running"; summary: string; detail?: string }) {
+    this.calls.push(input);
+    return {
+      activity: {
+        agentId: input.agentId,
+        status: input.status,
+        summary: input.summary,
+        detail: input.detail ?? null,
+        updatedAt: "2025-04-03T22:19:08.000Z"
+      }
+    };
+  }
+}
+
 async function issueRegistrationToken(fetcher: DaemonFetcher) {
   const response = await fetcher(
     new Request("http://control-plane.local/organizations/org_demo/runtime-registration-tokens", {
@@ -669,6 +691,8 @@ describe("daemon runtime", () => {
     expect(host.runCalls).toHaveLength(1);
     expect(host.runCalls[0]?.agentId).toBe(createAgentPayload.agent.id);
     expect(host.runCalls[0]?.prompt).toContain("Why did the deploy fail?");
+    expect(host.runCalls[0]?.prompt).toContain("Authoritative agent profile for this conversation:");
+    expect(host.runCalls[0]?.prompt).toContain("Answers direct engineering questions.");
 
     const bootstrapResponse = await app.request("/bootstrap/workspace");
     const bootstrapPayload = (await bootstrapResponse.json()) as {
@@ -685,6 +709,164 @@ describe("daemon runtime", () => {
           message.content.includes("Reply from Coder")
       )
     ).toBe(true);
+
+    await runtime.stop();
+  });
+
+  test("injects the agent description only on the first direct-message turn", async () => {
+    const app = createControlPlaneApp({
+      controlPlaneUrl: "http://control-plane.local"
+    });
+    const stateStore = new MemoryStateStore();
+    const host = new RecordingAgentHost();
+    const scheduler = new ManualScheduler();
+    const runtime = createDaemonRuntime(
+      {
+        controlPlaneUrl: "http://control-plane.local",
+        registrationToken: await issueRegistrationToken(app.fetch),
+        nodeName: "ops-runtime",
+        agentKey: "runtime_001",
+        heartbeatIntervalMs: 30_000,
+        statePath: "/tmp/workpilot-agent-daemon/state.json",
+        workspaceRoot: "/tmp/workpilot-agent-daemon/workspace"
+      },
+      {
+        fetcher: app.fetch,
+        stateStore,
+        agentHost: host,
+        scheduler
+      }
+    );
+
+    await runtime.start();
+
+    const currentRuntimeId = (await stateStore.load())?.runtimeId;
+    const createAgentResponse = await app.request(`/runtimes/${currentRuntimeId}/agents`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        name: "Coder",
+        description: "Answers direct engineering questions.",
+        implementation: "codex",
+        model: "gpt-5.4",
+        reasoningEffort: "high"
+      })
+    });
+    const createAgentPayload = (await createAgentResponse.json()) as {
+      agent: AgentIdentity;
+    };
+
+    await runtime.refreshAgents();
+
+    await app.request(`/channels/${createAgentPayload.agent.channelId}/messages`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        content: "First question",
+        senderId: "usr_admin",
+        senderType: "user"
+      })
+    });
+
+    await scheduler.tick();
+
+    await app.request(`/channels/${createAgentPayload.agent.channelId}/messages`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        content: "Second question",
+        senderId: "usr_admin",
+        senderType: "user"
+      })
+    });
+
+    await scheduler.tick();
+
+    expect(host.runCalls).toHaveLength(2);
+    expect(host.runCalls[0]?.prompt).toContain("Authoritative agent profile for this conversation:");
+    expect(host.runCalls[1]?.prompt).not.toContain("Authoritative agent profile for this conversation:");
+
+    await runtime.stop();
+  });
+
+  test("reports agent activity while processing direct messages", async () => {
+    const app = createControlPlaneApp({
+      controlPlaneUrl: "http://control-plane.local"
+    });
+    const stateStore = new MemoryStateStore();
+    const host = new RecordingAgentHost();
+    const scheduler = new ManualScheduler();
+    const activityReporter = new RecordingAgentActivityReporter();
+    const runtime = createDaemonRuntime(
+      {
+        controlPlaneUrl: "http://control-plane.local",
+        registrationToken: await issueRegistrationToken(app.fetch),
+        nodeName: "ops-runtime",
+        agentKey: "runtime_001",
+        heartbeatIntervalMs: 30_000,
+        statePath: "/tmp/workpilot-agent-daemon/state.json",
+        workspaceRoot: "/tmp/workpilot-agent-daemon/workspace"
+      },
+      {
+        fetcher: app.fetch,
+        stateStore,
+        agentHost: host,
+        scheduler,
+        recordAgentActivity: (input) => activityReporter.record(input)
+      }
+    );
+
+    await runtime.start();
+
+    const currentRuntimeId = (await stateStore.load())?.runtimeId;
+    const createAgentResponse = await app.request(`/runtimes/${currentRuntimeId}/agents`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        name: "Coder",
+        description: "Answers direct engineering questions.",
+        implementation: "codex",
+        model: "gpt-5.4",
+        reasoningEffort: "high"
+      })
+    });
+    const createAgentPayload = (await createAgentResponse.json()) as {
+      agent: AgentIdentity;
+    };
+
+    await runtime.refreshAgents();
+
+    await app.request(`/channels/${createAgentPayload.agent.channelId}/messages`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        content: "Why did the deploy fail?",
+        senderId: "usr_admin",
+        senderType: "user"
+      })
+    });
+
+    await scheduler.tick();
+
+    expect(activityReporter.calls).toHaveLength(2);
+    expect(activityReporter.calls[0]).toMatchObject({
+      agentId: createAgentPayload.agent.id,
+      status: "running"
+    });
+    expect(activityReporter.calls[1]).toMatchObject({
+      agentId: createAgentPayload.agent.id,
+      status: "idle"
+    });
 
     await runtime.stop();
   });

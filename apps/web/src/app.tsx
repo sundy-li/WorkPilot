@@ -25,8 +25,9 @@ import {
   UserRound,
   GripVertical
 } from "lucide-react";
-import { startTransition, useEffect, useMemo, useRef, useState, type ClipboardEvent, type FormEvent, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
+import { startTransition, useEffect, useMemo, useRef, useState, type ClipboardEvent, type FormEvent, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { createWorkPilotApiClient } from "./lib/api";
+import { parseRouterState, usePathname, useNavigate, buildPath } from "./lib/router";
 import {
   createAgentDraftForImplementation,
   createInitialAgentDraft,
@@ -37,6 +38,7 @@ import {
 import { getPublicImplementationSummary } from "./lib/agent-presentation";
 import { avatarGlyphIds, avatarPalettes, getAvatarGlyph, getAvatarInitials, getAvatarPalette, getAvatarPaletteById, type AvatarGlyphId } from "./lib/avatar";
 import { shouldAutoScrollToLatest } from "./lib/chat-scroll";
+import { mergeChannelMessages, shouldPollCurrentChat } from "./lib/chat-sync";
 import { formatConversationTitle } from "./lib/chat-header";
 import {
   createComposerAttachmentDrafts,
@@ -52,6 +54,8 @@ import {
   type RailMetric,
   type RailStep
 } from "./lib/inspection-rail";
+import { getAgentActivityBadge } from "./lib/agent-activity";
+import { getAgentWorkspaceLayoutClasses, getAppShellGridClass, getChatPanelLayoutClasses } from "./lib/app-shell-layout";
 import { closeDetailPanel, openDetailPanel, shouldShowExplorer, type DetailPanelState } from "./lib/layout-state";
 import { clearSelection, createSelectionState, toggleMessageSelection, type MessageSelectionState } from "./lib/message-selection";
 import { getMessageAttachments } from "./lib/message-attachments";
@@ -62,6 +66,7 @@ import {
   findNewlyConnectedRuntime,
   getRuntimeConnectStatusText
 } from "./lib/runtime-connect";
+import { createTimestampLabels } from "./lib/timestamp";
 import {
   createInitialShellState,
   getChannelDisplayName,
@@ -111,6 +116,8 @@ import {
 const api = createWorkPilotApiClient({
   baseUrl: "http://localhost:3001"
 });
+
+const chatPanelLayoutClassNames = getChatPanelLayoutClasses();
 
 const initialCredentials = {
   email: "admin@workpilot.local",
@@ -291,6 +298,47 @@ export function App() {
     persistThemeMode(window.localStorage, themeMode);
   }, [themeMode]);
 
+  const pathname = usePathname();
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    if (!session && pathname !== "/login") {
+      return;
+    }
+
+    if (session && pathname === "/login") {
+      navigate("/workspace/org_demo");
+      return;
+    }
+
+    if (!workspace) return;
+
+    const routerState = parseRouterState(pathname);
+
+    if (routerState.isLoginPage && session) {
+      navigate(`/workspace/${routerState.workspaceId || "org_demo"}`);
+      return;
+    }
+
+    setShellState((current) => ({
+      ...current,
+      workspaceId: routerState.workspaceId,
+      primaryView: routerState.primaryView === "issues" ? "kanban" : routerState.primaryView,
+      activeTarget: routerState.activeChannelId
+        ? { kind: "channel", id: routerState.activeChannelId }
+        : routerState.activeAgentId
+        ? { kind: "agent", id: routerState.activeAgentId }
+        : current.activeTarget,
+      detailOpen: false,
+    }));
+
+    if (routerState.primaryView === "issues") {
+      setCenterView("issues");
+    } else if (routerState.primaryView === "chat") {
+      setCenterView("chat");
+    }
+  }, [pathname, session, workspace]);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -327,7 +375,7 @@ export function App() {
     let cancelled = false;
 
     async function refreshWorkspace() {
-      const payload = await api.getWorkspaceBootstrap();
+      const payload = await api.getWorkspaceBootstrap(shellState.workspaceId);
 
       if (cancelled) {
         return;
@@ -344,15 +392,10 @@ export function App() {
       }
     });
 
-    const intervalId = window.setInterval(() => {
-      void refreshWorkspace().catch(() => {});
-    }, 2500);
-
     return () => {
       cancelled = true;
-      window.clearInterval(intervalId);
     };
-  }, [session]);
+  }, [session, shellState.workspaceId]);
 
   useEffect(() => {
     if (!workspace) {
@@ -512,6 +555,14 @@ export function App() {
   const activeMessages = workspace?.messages.filter((message) => message.channelId === activeChannelId) ?? [];
   const activeIssues = workspaceIssues.filter((issue) => issue.sourceChannelId === activeChannelId);
   const activeAgentLifecycleState = activeAgent?.status ?? "running";
+  const activeAgentActivity =
+    activeAgent ? workspace?.agentActivities.find((activity) => activity.agentId === activeAgent.id) ?? null : null;
+  const activeAgentActivityBadge = activeAgent
+    ? getAgentActivityBadge({
+        implementation: activeAgent.implementation,
+        activity: activeAgentActivity
+      })
+    : null;
   const isActiveAgentStopped = activeAgentLifecycleState === "stopped";
   const selectedRuntimeId = selectedRuntimeIdForPage ?? workspace?.runtimes[0]?.id ?? null;
   const selectedAgentWorkspace =
@@ -532,16 +583,39 @@ export function App() {
     ? workspaceIssues.filter((issue) => issue.assigneeId === selectedAgentWorkspace.id)
     : [];
   const selectedAgentWorkspaceLifecycleState = selectedAgentWorkspace?.status ?? "running";
+  const selectedAgentWorkspaceActivity =
+    selectedAgentWorkspace
+      ? workspace?.agentActivities.find((activity) => activity.agentId === selectedAgentWorkspace.id) ?? null
+      : null;
   const isSelectedAgentWorkspaceStopped = selectedAgentWorkspaceLifecycleState === "stopped";
+  const agentWorkspaceLayoutClassNames = getAgentWorkspaceLayoutClasses(agentWorkspace.mode);
   const detailContextMessages =
     shellState.primaryView === "agents" && agentWorkspace.mode === "chat" ? selectedAgentWorkspaceMessages : activeMessages;
+  const currentChatChannelId =
+    shellState.primaryView === "agents" && agentWorkspace.mode === "chat"
+      ? selectedAgentWorkspaceChannelId || null
+      : shellState.primaryView === "chat"
+        ? activeChannelId || null
+        : null;
+  const currentChatMessages =
+    currentChatChannelId ? workspace?.messages.filter((message) => message.channelId === currentChatChannelId) ?? [] : [];
+  const currentChatTargetKind =
+    shellState.primaryView === "agents" && agentWorkspace.mode === "chat"
+      ? "agent"
+      : shellState.primaryView === "chat"
+        ? shellState.activeTarget.kind
+        : "channel";
+  const currentChatAgentActivityStatus =
+    currentChatTargetKind === "agent"
+      ? shellState.primaryView === "agents" && agentWorkspace.mode === "chat"
+        ? selectedAgentWorkspaceActivity?.status ?? null
+        : activeAgentActivity?.status ?? null
+      : null;
   const runtimeWorkspaceAgents = selectedRuntimeWorkspace
     ? workspace?.agents.filter((agent) => agent.runtimeId === selectedRuntimeWorkspace.id) ?? []
     : [];
   const selectedImplementation = getAgentImplementationDefinition(agentDraft.implementation);
   const selectedImplementationSummary = getPublicImplementationSummary(selectedImplementation);
-  const selectedMessage =
-    detailPanel.kind === "message" ? detailContextMessages.find((message) => message.id === detailPanel.itemId) ?? null : null;
   const selectedIssue = detailPanel.kind === "issue" ? workspaceIssues.find((issue) => issue.id === detailPanel.itemId) ?? null : null;
   const selectedAgent =
     detailPanel.kind === "agent" ? workspace?.agents.find((agent) => agent.id === detailPanel.itemId) ?? null : null;
@@ -549,21 +623,11 @@ export function App() {
     detailPanel.kind === "runtime"
       ? workspace?.runtimes.find((runtime) => runtime.id === detailPanel.itemId) ?? null
       : null;
-  const relatedIssuesForSelectedMessage = useMemo(
-    () =>
-      selectedMessage
-        ? activeIssues.filter((issue) => issue.sourceChannelId === selectedMessage.channelId)
-        : [],
-    [activeIssues, selectedMessage]
-  );
-  const linkedIssueForSelectedMessage = relatedIssuesForSelectedMessage[0] ?? null;
   const selectedMessageRecords = activeMessages.filter((message) => messageSelection.selectedIds.includes(message.id));
   const selectedIssueSourceMessages =
     selectedIssue && selectedIssue.sourceChannelId === activeChannelId ? detailContextMessages : [];
   const selectedAgentForIssue =
     selectedIssue?.assigneeId ? workspace?.agents.find((agent) => agent.id === selectedIssue.assigneeId) ?? null : null;
-  const selectedAgentForMessage =
-    selectedMessage?.senderType === "agent" ? workspace?.agents.find((agent) => agent.id === selectedMessage.senderId) ?? null : null;
   const connectedRuntime =
     runtimeConnectPanel?.connectedRuntimeId
       ? workspace?.runtimes.find((runtime) => runtime.id === runtimeConnectPanel.connectedRuntimeId) ?? null
@@ -593,9 +657,9 @@ export function App() {
   const railModel = detailPanel.isOpen
     ? createInspectionRailModel({
         kind: detailPanel.kind ?? "account",
-        message: selectedMessage,
-        issue: selectedIssue ?? linkedIssueForSelectedMessage,
-        agent: selectedAgent ?? selectedAgentForIssue ?? selectedAgentForMessage,
+        message: null,
+        issue: selectedIssue,
+        agent: selectedAgent ?? selectedAgentForIssue,
         runtime: selectedRuntime ?? (selectedAgent ? workspace?.runtimes.find((runtime) => runtime.id === selectedAgent.runtimeId) ?? null : null),
         issues: activeIssues,
         messages: detailContextMessages
@@ -609,6 +673,106 @@ export function App() {
       sessionUserId: session?.userId ?? "",
       accountName
     });
+
+  useEffect(() => {
+    if (!session || !currentChatChannelId) {
+      return;
+    }
+
+    let cancelled = false;
+
+    async function loadChatHistory() {
+      const payload = await api.getChannelMessages(currentChatChannelId, {
+        organizationId: shellState.workspaceId ?? undefined
+      });
+
+      if (cancelled) {
+        return;
+      }
+
+      setWorkspace((current) =>
+        current
+          ? {
+              ...mergeChannelMessages(current, currentChatChannelId, payload.messages),
+              agentActivities: [
+                ...current.agentActivities.filter(
+                  (activity) => !payload.agentActivities.some((nextActivity) => nextActivity.agentId === activity.agentId)
+                ),
+                ...payload.agentActivities
+              ]
+            }
+          : current
+      );
+    }
+
+    void loadChatHistory().catch(() => {});
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentChatChannelId, session, shellState.workspaceId]);
+
+  useEffect(() => {
+    if (!session || !workspace || !currentChatChannelId) {
+      return;
+    }
+
+    const lastUserMessageAt =
+      [...currentChatMessages].reverse().find((message) => message.senderType === "user")?.createdAt ?? null;
+    const lastAgentMessageAt =
+      [...currentChatMessages].reverse().find((message) => message.senderType === "agent")?.createdAt ?? null;
+
+    if (
+      !shouldPollCurrentChat({
+        targetKind: currentChatTargetKind,
+        activeAgentStatus: currentChatAgentActivityStatus,
+        lastUserMessageAt,
+        lastAgentMessageAt
+      })
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+    const cursor = currentChatMessages[currentChatMessages.length - 1]?.createdAt;
+
+    async function pollCurrentChat() {
+      const payload = await api.getChannelMessages(currentChatChannelId, {
+        after: cursor,
+        organizationId: shellState.workspaceId ?? undefined
+      });
+
+      if (cancelled || (payload.messages.length === 0 && payload.agentActivities.length === 0)) {
+        return;
+      }
+
+      setWorkspace((current) =>
+        current
+          ? {
+              ...mergeChannelMessages(current, currentChatChannelId, [
+                ...current.messages.filter((message) => message.channelId === currentChatChannelId),
+                ...payload.messages
+              ]),
+              agentActivities: [
+                ...current.agentActivities.filter(
+                  (activity) => !payload.agentActivities.some((nextActivity) => nextActivity.agentId === activity.agentId)
+                ),
+                ...payload.agentActivities
+              ]
+            }
+          : current
+      );
+    }
+
+    const intervalId = window.setInterval(() => {
+      void pollCurrentChat().catch(() => {});
+    }, 1500);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [currentChatAgentActivityStatus, currentChatChannelId, currentChatMessages, currentChatTargetKind, session, shellState.workspaceId, workspace]);
 
   useEffect(() => {
     if (!workspace) {
@@ -683,6 +847,7 @@ export function App() {
       setAccountAvatarGlyphId(getAvatarGlyph(response.session.email));
       setPasswordDraft(initialPasswordDraft);
       setSettingsNotice(null);
+      navigate("/workspace/org_demo");
     } catch (loginError) {
       setError(loginError instanceof Error ? loginError.message : "Unable to sign in.");
     } finally {
@@ -1029,7 +1194,7 @@ export function App() {
   }
 
   async function reloadWorkspaceSnapshot() {
-    const nextWorkspace = await api.getWorkspaceBootstrap();
+    const nextWorkspace = await api.getWorkspaceBootstrap(shellState.workspaceId);
     setWorkspace(nextWorkspace);
     return nextWorkspace;
   }
@@ -1129,6 +1294,11 @@ export function App() {
         name: channelDraftName
       });
       const nextWorkspace = await reloadWorkspaceSnapshot();
+      const path = buildPath(`/workspace/:workspaceId/channel/:channelId`, {
+        workspaceId: shellState.workspaceId,
+        channelId: result.channel.id,
+      });
+      navigate(path);
       setShellState((current) => selectConversationTarget(current, { kind: "channel", id: result.channel.id }));
       setWorkspace(nextWorkspace);
       setCenterView("chat");
@@ -1165,6 +1335,10 @@ export function App() {
     setIsRuntimeCreateMenuOpen(false);
     setIsCreateAgentModalOpen(false);
     setIsChannelCreateOpen(false);
+    navigate("/login");
+  }
+
+  function handleResetState() {
     setIsChannelCreateModalOpen(false);
     setIsWorkspaceSwitcherOpen(false);
     setIsWorkspaceCreateOpen(false);
@@ -1275,6 +1449,12 @@ export function App() {
       setAgentWorkspace(selectAgentWorkspaceTarget(id));
     }
 
+    const path = buildPath(`/workspace/:workspaceId/${kind}/:id`, {
+      workspaceId: shellState.workspaceId,
+      kind,
+      id,
+    });
+    navigate(path);
     setShellState((current) => selectConversationTarget(current, { kind, id }));
     setCenterView("chat");
     setDetailPanel(initialDetailPanelState);
@@ -1289,6 +1469,10 @@ export function App() {
   }
 
   function handleSelectPrimaryView(primaryView: "chat" | "kanban" | "agents" | "runtimes" | "settings") {
+    const path = buildPath(`/workspace/:workspaceId/${primaryView === "kanban" ? "issues" : primaryView}`, {
+      workspaceId: shellState.workspaceId,
+    });
+    navigate(path);
     setShellState((current) => selectPrimaryView(current, primaryView));
     setDetailPanel(initialDetailPanelState);
     setAgentActionNotice(null);
@@ -1341,12 +1525,16 @@ export function App() {
 
   function handleOpenAgentWorkspace(agentId: string) {
     const runtimeId = workspace?.agents.find((agent) => agent.id === agentId)?.runtimeId ?? null;
+    const path = buildPath("/workspace/:workspaceId/agents", {
+      workspaceId: shellState.workspaceId,
+    });
 
     setAgentWorkspace(selectAgentWorkspaceTarget(agentId));
     if (runtimeId) {
       setSelectedRuntimeIdForPage(runtimeId);
       setRuntimeWorkspace(selectRuntimeWorkspaceTarget(runtimeId));
     }
+    navigate(path);
     setShellState((current) => selectPrimaryView(current, "agents"));
     setDetailPanel(initialDetailPanelState);
     setAgentActionNotice(null);
@@ -1402,7 +1590,7 @@ export function App() {
     avatarInputRef.current?.click();
   }
 
-  function handleMessageContextMenu(event: MouseEvent<HTMLElement>, messageId: string) {
+  function handleMessageContextMenu(event: ReactMouseEvent<HTMLElement>, messageId: string) {
     event.preventDefault();
     setMessageContextMenu({
       messageId,
@@ -1647,6 +1835,10 @@ export function App() {
   }
 
   if (!session) {
+    if (pathname !== "/login") {
+      navigate("/login");
+      return null;
+    }
     return (
       <main className="min-h-screen bg-[radial-gradient(circle_at_top,_#ffffff_0%,_#eef4ff_58%,_#e2e8f0_100%)] px-6 py-10 text-neutral-950">
         <div className="mx-auto grid min-h-[calc(100vh-5rem)] max-w-6xl gap-8 lg:grid-cols-[1.2fr_0.8fr]">
@@ -1756,17 +1948,7 @@ export function App() {
 
   return (
     <main className="app-shell flex h-screen w-full flex-col overflow-hidden px-0 py-0">
-      <div
-        className={`grid h-full min-h-0 w-full flex-1 gap-0 ${
-          detailPanel.isOpen
-            ? isExplorerVisible
-              ? "xl:grid-cols-[68px_320px_minmax(0,1fr)_380px]"
-              : "xl:grid-cols-[68px_minmax(0,1fr)_380px]"
-            : isExplorerVisible
-              ? "xl:grid-cols-[68px_320px_minmax(0,1fr)]"
-              : "xl:grid-cols-[68px_minmax(0,1fr)]"
-        }`}
-      >
+      <div className={getAppShellGridClass({ detailOpen: detailPanel.isOpen, explorerVisible: isExplorerVisible })}>
         <aside className="shell-panel shell-panel--sidebar relative flex h-full min-h-0 flex-col items-center overflow-visible rounded-none border-r-0 px-2 py-3">
           <div ref={workspaceSwitcherRef} className="relative">
             <button
@@ -2136,77 +2318,88 @@ export function App() {
 
         <section className="shell-panel shell-panel--main flex h-full min-h-0 flex-col overflow-hidden rounded-none">
           {shellState.primaryView === "chat" ? (
-            <>
-              <div className="border-b border-neutral-200 px-4 py-4 lg:px-5">
-                <div className="flex flex-wrap items-start justify-between gap-4">
-                  <div className="flex min-w-0 items-center gap-2.5">
-                    {shellState.activeTarget.kind === "channel" ? (
-                      <MessageSquareText className="size-5 text-[var(--accent)]" />
-                    ) : (
-                      <Bot className="size-5 text-[var(--accent)]" />
-                    )}
-                    <div className="min-w-0">
-                      <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--accent-strong)]">
-                        {shellState.activeTarget.kind === "agent" ? "Active agent thread" : "Current thread"}
-                      </p>
-                      <h1 className="truncate text-[24px] font-semibold tracking-[-0.04em] lg:text-[26px]">
-                        {formatConversationTitle({
-                          kind: shellState.activeTarget.kind,
-                          name:
-                            shellState.activeTarget.kind === "channel"
-                              ? getChannelDisplayName(activeChannel ?? { id: "", type: "group", name: "all" })
-                              : activeAgent?.name ?? "Agent"
-                        })}
-                      </h1>
+            <div className={chatPanelLayoutClassNames.shell}>
+              <div className={`${chatPanelLayoutClassNames.topChrome} bg-[linear-gradient(180deg,rgba(255,255,255,0.98)_0%,rgba(251,252,255,0.96)_100%)] backdrop-blur-sm`}>
+                <div className={`${chatPanelLayoutClassNames.header} border-b border-neutral-200 px-4 py-4 lg:px-5`}>
+                  <div className="flex flex-wrap items-start justify-between gap-4">
+                    <div className="flex min-w-0 items-center gap-2.5">
+                      {shellState.activeTarget.kind === "channel" ? (
+                        <MessageSquareText className="size-5 text-[var(--accent)]" />
+                      ) : (
+                        <Bot className="size-5 text-[var(--accent)]" />
+                      )}
+                      <div className="min-w-0">
+                        <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--accent-strong)]">
+                          {shellState.activeTarget.kind === "agent" ? "Active agent thread" : "Current thread"}
+                        </p>
+                        <h1 className="truncate text-[24px] font-semibold tracking-[-0.04em] lg:text-[26px]">
+                          {formatConversationTitle({
+                            kind: shellState.activeTarget.kind,
+                            name:
+                              shellState.activeTarget.kind === "channel"
+                                ? getChannelDisplayName(activeChannel ?? { id: "", type: "group", name: "all" })
+                                : activeAgent?.name ?? "Agent"
+                          })}
+                        </h1>
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap items-center justify-end gap-2">
+                      <Badge>{activeMessages.length} messages</Badge>
+                      <Badge>{activeIssues.length} issues</Badge>
+                      {activeAgent ? (
+                        <Badge>{activeAgentActivityBadge?.label ?? (activeAgentLifecycleState === "running" ? "running" : "stopped")}</Badge>
+                      ) : null}
+                      {activeAgent ? (
+                        <>
+                          <Button
+                            onClick={() => handleOpenLifecycleDialog(activeAgentLifecycleState === "running" ? "stopped" : "running")}
+                            size="sm"
+                            type="button"
+                            variant="secondary"
+                          >
+                            {activeAgentLifecycleState === "running" ? "Stop" : "Start"}
+                          </Button>
+                          <Button onClick={handleOpenRestartDialog} size="sm" type="button" variant="secondary">
+                            Restart
+                          </Button>
+                          <Button
+                            className="border-rose-200 text-rose-700 hover:bg-rose-50 hover:text-rose-800"
+                            onClick={handleOpenDeleteDialog}
+                            size="sm"
+                            type="button"
+                            variant="secondary"
+                          >
+                            Delete
+                          </Button>
+                        </>
+                      ) : null}
                     </div>
                   </div>
-                  <div className="flex flex-wrap items-center justify-end gap-2">
-                    <Badge>{activeMessages.length} messages</Badge>
-                    <Badge>{activeIssues.length} issues</Badge>
-                    {activeAgent ? (
-                      <Badge>{activeAgentLifecycleState === "running" ? "running" : "stopped"}</Badge>
-                    ) : null}
-                    {activeAgent ? (
-                      <>
-                        <Button
-                          onClick={() => handleOpenLifecycleDialog(activeAgentLifecycleState === "running" ? "stopped" : "running")}
-                          size="sm"
-                          type="button"
-                          variant="secondary"
-                        >
-                          {activeAgentLifecycleState === "running" ? "Stop" : "Start"}
-                        </Button>
-                        <Button onClick={handleOpenRestartDialog} size="sm" type="button" variant="secondary">
-                          Restart
-                        </Button>
-                        <Button
-                          className="border-rose-200 text-rose-700 hover:bg-rose-50 hover:text-rose-800"
-                          onClick={handleOpenDeleteDialog}
-                          size="sm"
-                          type="button"
-                          variant="secondary"
-                        >
-                          Delete
-                        </Button>
-                      </>
-                    ) : null}
-                  </div>
+                  {agentActionNotice ? (
+                    <div className="mt-4 rounded-[1rem] border border-[rgba(244,114,182,0.2)] bg-[rgba(255,241,248,0.96)] px-3 py-3 text-sm text-neutral-700 shadow-[0_8px_24px_rgba(244,114,182,0.08)]">
+                      {agentActionNotice}
+                    </div>
+                  ) : null}
+                  {activeAgent && activeAgentActivityBadge ? (
+                    <div className="mt-4 flex flex-wrap items-start gap-3 rounded-[1rem] border border-amber-200 bg-[linear-gradient(135deg,rgba(255,251,235,0.98),rgba(255,247,237,0.94))] px-3 py-3 text-sm text-neutral-700 shadow-[0_10px_24px_rgba(245,158,11,0.10)]">
+                      <StatusPill tone={activeAgentActivityBadge.tone}>{activeAgentActivityBadge.label}</StatusPill>
+                      <div className="min-w-0 flex-1">
+                        <p className="font-medium text-neutral-900">{activeAgentActivityBadge.summary}</p>
+                        {activeAgentActivityBadge.detail ? <p className="mt-1 text-xs text-neutral-500">{activeAgentActivityBadge.detail}</p> : null}
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
-                {agentActionNotice ? (
-                  <div className="mt-4 rounded-[1rem] border border-[rgba(244,114,182,0.2)] bg-[rgba(255,241,248,0.96)] px-3 py-3 text-sm text-neutral-700 shadow-[0_8px_24px_rgba(244,114,182,0.08)]">
-                    {agentActionNotice}
-                  </div>
-                ) : null}
-              </div>
 
-              <div className="border-b border-neutral-200 bg-[var(--panel-muted)]/80 px-4 py-2.5 lg:px-5">
-                <div className="flex gap-2">
-                  <TabButton active={centerView === "chat"} icon={MessageSquareText} label="Chat" onClick={() => setCenterView("chat")} />
-                  <TabButton active={centerView === "issues"} icon={ClipboardList} label="Issues" onClick={() => setCenterView("issues")} />
+                <div className={`${chatPanelLayoutClassNames.tabs} border-b border-neutral-200 bg-[var(--panel-muted)]/80 px-4 py-2.5 lg:px-5`}>
+                  <div className="flex gap-2">
+                    <TabButton active={centerView === "chat"} icon={MessageSquareText} label="Chat" onClick={() => setCenterView("chat")} />
+                    <TabButton active={centerView === "issues"} icon={ClipboardList} label="Issues" onClick={() => setCenterView("issues")} />
+                  </div>
                 </div>
               </div>
 
-              <div className="min-h-0 flex-1 overflow-hidden px-4 py-4 lg:px-5">
+              <div className={`${chatPanelLayoutClassNames.content} px-4 py-4 lg:px-5`}>
                 {centerView === "chat" ? (
                   <div className="relative flex h-full min-h-0 flex-col">
                     {messageSelection.isMultiSelectMode ? (
@@ -2241,16 +2434,17 @@ export function App() {
                       </div>
                     ) : null}
 
-                    <div ref={messageScrollerRef} className="min-h-0 flex-1 overflow-y-auto rounded-[1.15rem] border border-neutral-200 bg-[var(--panel-elevated)] p-3">
+                    <div ref={messageScrollerRef} className={`${chatPanelLayoutClassNames.scroller} rounded-[1.15rem] border border-neutral-200 bg-[var(--panel-elevated)] p-3`}>
                       <div className="grid gap-1">
                       {activeMessages.length === 0 ? (
                         <EmptyState>No messages yet. Start the conversation.</EmptyState>
                       ) : (
                         activeMessages.map((message) => {
                           const tone = getActorTone(message.senderType);
-                          const isSelected = detailPanel.kind === "message" && detailPanel.itemId === message.id;
+                          const isSelected = selectedMessageId === message.id;
                           const isMultiSelected = messageSelection.selectedIds.includes(message.id);
                           const senderDisplayName = displayMessageSenderName(message);
+                          const timestamp = createTimestampLabels(message.createdAt);
 
                           return (
                             <div
@@ -2264,7 +2458,6 @@ export function App() {
                                 }
 
                                 setSelectedMessageId(message.id);
-                                handleOpenDetailPanel("message", message.id);
                               }}
                               role="button"
                               tabIndex={0}
@@ -2308,7 +2501,9 @@ export function App() {
                                       </span>
                                       {tone === "agent" ? <StatusDot tone="success" /> : null}
                                       <span className="font-mono text-[11px] uppercase tracking-[0.16em] text-neutral-400">{message.senderType}</span>
-                                      <span className="font-mono text-[11px] text-neutral-400">{formatTimestamp(message.createdAt)}</span>
+                                      <span className="font-mono text-[11px] text-neutral-400" title={timestamp.precise}>
+                                        {timestamp.compact}
+                                      </span>
                                     </div>
                                     {getMessageAttachments(message.attachments).length > 0 ? (
                                       <div className="mt-3">
@@ -2347,7 +2542,7 @@ export function App() {
                     ) : null}
                   </div>
                 ) : (
-                  <div className="h-full overflow-y-auto rounded-[1.25rem] border border-neutral-200 bg-[var(--panel-elevated)] p-3">
+                  <div className={`${chatPanelLayoutClassNames.scroller} rounded-[1.25rem] border border-neutral-200 bg-[var(--panel-elevated)] p-3`}>
                     <div className="grid gap-2.5">
                     {activeIssues.length === 0 ? (
                       <EmptyState>No issues in this conversation yet.</EmptyState>
@@ -2379,7 +2574,7 @@ export function App() {
                 )}
               </div>
 
-              <div className="border-t border-neutral-200 bg-[var(--panel-muted)]/80 p-3 lg:p-4">
+              <div className={`${chatPanelLayoutClassNames.composer} border-t border-neutral-200 bg-[var(--panel-muted)]/80 p-3 lg:p-4`}>
                 <div className="grid gap-3">
                   <input
                     ref={fileInputRef}
@@ -2440,7 +2635,7 @@ export function App() {
                   </div>
                 </div>
               </div>
-            </>
+            </div>
           ) : shellState.primaryView === "kanban" ? (
             <div className="flex h-full flex-col">
               <div className="border-b border-neutral-200 px-5 py-5">
@@ -2661,26 +2856,23 @@ export function App() {
             </div>
           ) : shellState.primaryView === "agents" ? (
             <div className="flex h-full flex-col">
-              <div className="min-h-0 flex-1 overflow-y-auto px-2 py-3 lg:px-3 lg:py-4">
+              <div className={agentWorkspaceLayoutClassNames.viewport}>
                 {selectedAgentWorkspace ? (
-                  <div className="w-full space-y-4">
-                    <div className="overflow-hidden rounded-[1.25rem] border border-neutral-200 bg-white">
-                      <div className="flex flex-col gap-4 border-b border-neutral-200 px-5 py-4 lg:flex-row lg:items-start lg:justify-between">
-                        <div className="flex items-start gap-3">
-                          <div className={`${getActorAvatarClass("agent")} size-12 text-emerald-700`}>
+                  <div className={agentWorkspaceLayoutClassNames.content}>
+                    <div className="overflow-hidden rounded-[1.25rem] bg-white">
+                      <div className="flex flex-col gap-2 border-b border-neutral-200 px-5 py-3 lg:flex-row lg:items-start lg:justify-between">
+                        <div className="flex items-center gap-3">
+                          <div className={`${getActorAvatarClass("agent")} size-10 text-emerald-700`}>
                             <Bot className="size-5" />
                           </div>
-                          <div>
-                            <div className="flex items-center gap-2">
-                              <h2 className="text-[26px] font-semibold tracking-[-0.04em] text-neutral-950">{selectedAgentWorkspace.name}</h2>
-                              <StatusPill tone={selectedAgentWorkspace.status === "running" ? "success" : "warning"}>
-                                {selectedAgentWorkspace.status}
-                              </StatusPill>
-                            </div>
-                            <p className="mt-1 text-sm text-neutral-500">{selectedAgentWorkspaceRuntime?.name ?? selectedAgentWorkspace.runtimeId}</p>
-                            <p className="mt-2 font-mono text-[11px] uppercase tracking-[0.16em] text-neutral-400">
+                          <div className="flex items-center gap-2">
+                            <h2 className="text-[22px] font-semibold tracking-[-0.04em] text-neutral-950">{selectedAgentWorkspace.name}</h2>
+                            <StatusPill tone={selectedAgentWorkspace.status === "running" ? "success" : "warning"}>
+                              {selectedAgentWorkspace.status}
+                            </StatusPill>
+                            <span className="font-mono text-[11px] uppercase tracking-[0.16em] text-neutral-400">
                               {selectedAgentWorkspace.implementation} / {selectedAgentWorkspace.model} / {selectedAgentWorkspace.reasoningEffort}
-                            </p>
+                            </span>
                           </div>
                         </div>
                         <div className="flex flex-wrap items-center gap-2">
@@ -2692,7 +2884,7 @@ export function App() {
                             type="button"
                           >
                             <Square className="size-4" />
-                            <span>停止</span>
+                            <span>Stop</span>
                           </button>
                           <button
                             aria-label="Reset agent"
@@ -2701,7 +2893,7 @@ export function App() {
                             type="button"
                           >
                             <RotateCcw className="size-4" />
-                            <span>重置</span>
+                            <span>Reset</span>
                           </button>
                           <button
                             aria-label="Delete agent"
@@ -2710,7 +2902,7 @@ export function App() {
                             type="button"
                           >
                             <Trash2 className="size-4" />
-                            <span>删除</span>
+                            <span>Delete</span>
                           </button>
                         </div>
                       </div>
@@ -2782,13 +2974,16 @@ export function App() {
                                   className="rounded-xl border border-neutral-200 bg-white px-3 py-3 text-left transition hover:border-neutral-300 hover:bg-neutral-50"
                                   onClick={() => {
                                     handleSelectConversation("agent", selectedAgentWorkspace.id);
-                                    handleOpenDetailPanel("message", message.id);
+                                    setSelectedMessageId(message.id);
                                   }}
                                   type="button"
                                 >
                                   <div className="flex items-center justify-between gap-3">
-                                    <span className="font-mono text-[11px] uppercase tracking-[0.16em] text-neutral-400">
-                                      {formatTimestamp(message.createdAt)}
+                                    <span
+                                      className="font-mono text-[11px] uppercase tracking-[0.16em] text-neutral-400"
+                                      title={createTimestampLabels(message.createdAt).precise}
+                                    >
+                                      {createTimestampLabels(message.createdAt).compact}
                                     </span>
                                     <span className="text-xs text-neutral-500">{message.channelId}</span>
                                   </div>
@@ -2842,7 +3037,7 @@ export function App() {
                         </div>
                       </div>
                     ) : (
-                      <div className="flex min-h-[720px] flex-col overflow-hidden rounded-[1.25rem] border border-neutral-200 bg-[var(--panel-elevated)] shadow-[0_10px_24px_rgba(15,23,42,0.05)]">
+                      <div className={`flex ${agentWorkspaceLayoutClassNames.chatPanel}`}>
                         <div ref={messageScrollerRef} className="min-h-0 flex-1 overflow-y-auto p-3">
                           <div className="grid gap-1">
                             {selectedAgentWorkspaceMessages.length === 0 ? (
@@ -2850,8 +3045,9 @@ export function App() {
                             ) : (
                               selectedAgentWorkspaceMessages.map((message) => {
                                 const tone = getActorTone(message.senderType);
-                                const isSelected = detailPanel.kind === "message" && detailPanel.itemId === message.id;
+                                const isSelected = selectedMessageId === message.id;
                                 const senderDisplayName = displayMessageSenderName(message);
+                                const timestamp = createTimestampLabels(message.createdAt);
 
                                 return (
                                   <div
@@ -2859,7 +3055,6 @@ export function App() {
                                     className={getMessageSurfaceClass(tone, isSelected)}
                                     onClick={() => {
                                       setSelectedMessageId(message.id);
-                                      handleOpenDetailPanel("message", message.id);
                                     }}
                                     role="button"
                                     tabIndex={0}
@@ -2896,7 +3091,9 @@ export function App() {
                                             <span className="font-mono text-[11px] uppercase tracking-[0.16em] text-neutral-400">
                                               {message.senderType}
                                             </span>
-                                            <span className="font-mono text-[11px] text-neutral-400">{formatTimestamp(message.createdAt)}</span>
+                                            <span className="font-mono text-[11px] text-neutral-400" title={timestamp.precise}>
+                                              {timestamp.compact}
+                                            </span>
                                           </div>
                                           {getMessageAttachments(message.attachments).length > 0 ? (
                                             <div className="mt-3">
@@ -3063,7 +3260,7 @@ export function App() {
                                   </div>
                                   <p className="mt-3 line-clamp-2 text-xs leading-5 text-neutral-600">{agent.description}</p>
                                 </button>
-                                <Button onClick={() => handleSelectConversation("agent", agent.id)} size="sm" type="button" variant="ghost">
+                                <Button onClick={() => handleOpenAgentWorkspace(agent.id)} size="sm" type="button" variant="ghost">
                                   Chat
                                 </Button>
                               </div>
@@ -3269,84 +3466,6 @@ export function App() {
                   </>
                 ) : null}
 
-                {detailPanel.kind === "message" && selectedMessage ? (
-                  <>
-                    <DetailCard accent="agent">
-                    {(() => {
-                      const senderDisplayName = displayMessageSenderName(selectedMessage);
-
-                      return (
-                        <>
-                    <div className="flex items-center gap-3">
-                      {selectedMessage.senderType === "agent" ? (
-                        <div className={`${getActorAvatarClass(getActorTone(selectedMessage.senderType))} size-10`}>
-                          <Bot className="size-4" />
-                        </div>
-                      ) : (
-                        <AvatarBadge
-                          imageUrl={selectedMessage.senderId === session.userId ? accountAvatarImage : null}
-                          glyphId={
-                            selectedMessage.senderId === session.userId
-                              ? accountAvatarGlyphId
-                              : getAvatarGlyph(selectedMessage.senderId)
-                          }
-                          name={senderDisplayName}
-                          paletteId={
-                            selectedMessage.senderId === session.userId
-                              ? accountAvatarPaletteId
-                              : getAvatarPalette(selectedMessage.senderId).id
-                          }
-                          size="md"
-                        />
-                      )}
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <p className="font-medium">{senderDisplayName}</p>
-                          {selectedMessage.senderType === "agent" ? <StatusDot tone="success" /> : null}
-                        </div>
-                        <p className="font-mono text-[11px] text-neutral-400">{formatTimestamp(selectedMessage.createdAt)}</p>
-                      </div>
-                    </div>
-                    {getMessageAttachments(selectedMessage.attachments).length > 0 ? (
-                      <div className="mt-4">
-                        <MessageAttachmentGallery attachments={selectedMessage.attachments} />
-                      </div>
-                    ) : null}
-                    {selectedMessage.content ? (
-                      <p className={`mt-4 select-text whitespace-pre-wrap break-words leading-7 ${selectedMessage.senderType === "agent" ? "font-mono text-[13.5px] text-neutral-800" : "text-sm text-neutral-700"}`}>
-                        {selectedMessage.content}
-                      </p>
-                    ) : null}
-                        </>
-                      );
-                    })()}
-                    </DetailCard>
-
-                    <DetailCard>
-                    <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-500">Related Issues</p>
-                    <div className="mt-3 grid gap-2">
-                      {relatedIssuesForSelectedMessage.length === 0 ? (
-                        <p className="text-sm text-neutral-500">No issues have been created from this message yet.</p>
-                      ) : (
-                        relatedIssuesForSelectedMessage.map((issue) => (
-                          <button
-                            key={issue.id}
-                            className="rounded-xl border border-neutral-200 bg-white px-3 py-3 text-left transition hover:border-neutral-300 hover:bg-neutral-50"
-                            onClick={() => handleOpenDetailPanel("issue", issue.id)}
-                            type="button"
-                          >
-                            <div className="flex items-center justify-between gap-3">
-                              <span className="text-sm font-medium">{issue.title}</span>
-                              <StatusPill tone={getIssueStatusTone(issue.status)}>{formatIssueStatus(issue.status)}</StatusPill>
-                            </div>
-                          </button>
-                        ))
-                      )}
-                    </div>
-                    </DetailCard>
-                  </>
-                ) : null}
-
                 {detailPanel.kind === "issue" && selectedIssue ? (
                   <DetailCard accent={getIssueStatusTone(selectedIssue.status)}>
                     <div className="flex items-center justify-between gap-3">
@@ -3453,7 +3572,7 @@ export function App() {
                   </>
                 ) : null}
 
-                {!selectedMessage && !selectedIssue && !selectedAgent && !selectedRuntime ? (
+                {!selectedIssue && !selectedAgent && !selectedRuntime ? (
                   <EmptyState>The selected item is no longer available.</EmptyState>
                 ) : null}
               </div>

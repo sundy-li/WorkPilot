@@ -34,6 +34,7 @@ const workspace: WorkspaceBootstrapPayload = {
       status: "running"
     }
   ],
+  agentActivities: [],
   messages: [],
   issues: []
 };

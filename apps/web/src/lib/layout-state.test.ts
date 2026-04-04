@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { closeDetailPanel, openDetailPanel, shouldShowExplorer, type DetailPanelState } from "./layout-state";
 
 describe("layout state", () => {
-  test("opens the detail panel for a selected message", () => {
+  test("ignores selected messages when opening the detail panel", () => {
     const current: DetailPanelState = {
       isOpen: false,
       itemId: null,
@@ -10,9 +10,9 @@ describe("layout state", () => {
     };
 
     expect(openDetailPanel(current, { kind: "message", itemId: "msg_1" })).toEqual({
-      isOpen: true,
-      itemId: "msg_1",
-      kind: "message"
+      isOpen: false,
+      itemId: null,
+      kind: null
     });
   });
 

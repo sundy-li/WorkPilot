@@ -101,6 +101,54 @@ describe("sandbox agent host", () => {
     expect(agentManifest.implementationPackage).toBe("@rivet-dev/agent-os-codex-agent");
   });
 
+  test("writes the agent profile to both AGENT.md and AGENTS.md", async () => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "workpilot-agent-host-"));
+    cleanupPaths.push(workspaceRoot);
+
+    const host = createSandboxAgentHost({
+      runtimeId: "rtm_demo",
+      runtimeName: "datacenter",
+      workspaceRoot,
+      createSandboxAgent: async () => ({
+        async installAgent() {},
+        async createSession() {
+          return {
+            id: "ses_unused",
+            async prompt() {
+              return {
+                stopReason: "end_turn"
+              };
+            }
+          };
+        },
+        async dispose() {}
+      })
+    });
+
+    const agent: AgentIdentity = {
+      id: "agt_codex",
+      runtimeId: "rtm_demo",
+      channelId: "dir_admin_coder",
+      name: "Nomi",
+      description: "You are coding agent named \"Nomi\", you can help people solve complex problems",
+      implementation: "codex",
+      model: "gpt-5.4",
+      reasoningEffort: "high",
+      status: "running"
+    };
+
+    await host.start();
+    await host.syncAgents([agent]);
+
+    const agentMd = await readFile(join(workspaceRoot, "rtm_demo", "agt_codex", "AGENT.md"), "utf8");
+    const agentsMd = await readFile(join(workspaceRoot, "rtm_demo", "agt_codex", "AGENTS.md"), "utf8");
+
+    expect(agentMd).toContain("Nomi");
+    expect(agentMd).toContain("help people solve complex problems");
+    expect(agentsMd).toContain("Nomi");
+    expect(agentsMd).toContain("help people solve complex problems");
+  });
+
   test("creates a session with the implementation-specific package when running a non-codex agent prompt", async () => {
     const workspaceRoot = await mkdtemp(join(tmpdir(), "workpilot-agent-host-"));
     cleanupPaths.push(workspaceRoot);

@@ -20,6 +20,7 @@ const workspace: WorkspaceBootstrapPayload = {
     {
       id: "agt_coder",
       runtimeId: "rtm_demo",
+      channelId: "dir_admin_coder",
       name: "Coder",
       description: "Writes code.",
       implementation: "codex",
@@ -28,6 +29,7 @@ const workspace: WorkspaceBootstrapPayload = {
       status: "running"
     }
   ],
+  agentActivities: [],
   messages: [
     {
       id: "msg_a",

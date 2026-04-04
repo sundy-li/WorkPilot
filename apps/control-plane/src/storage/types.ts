@@ -1,4 +1,6 @@
 import type {
+  AgentActivityDTO,
+  AgentActivityEventPayload,
   AgentControlActionDTO,
   AgentIdentity,
   AgentMessageResponsePayload,
@@ -71,6 +73,12 @@ export interface CreateMessageInput {
   }>;
   senderId: string;
   senderType: "user" | "agent" | "system";
+  occurredAt?: string;
+}
+
+export interface GetMessagesInput {
+  channelId: string;
+  after?: string;
 }
 
 export interface CreateIssueFromMessageInput {
@@ -145,7 +153,7 @@ export interface ControlPlaneStorage {
   getChannel(channelId: string): Promise<ChannelSummary | null>;
   getChannels(orgId: string): Promise<ChannelSummary[]>;
   createChannel(input: CreateChannelInput): Promise<ChannelSummary>;
-  getMessages(channelId: string): Promise<MessageDTO[]>;
+  getMessages(input: GetMessagesInput): Promise<MessageDTO[]>;
   getRuntimes(orgId: string): Promise<RuntimeIdentity[]>;
   getAgents(orgId: string): Promise<AgentIdentity[]>;
   getWorkspaceBootstrap(orgId: string): Promise<WorkspaceBootstrapPayload>;
@@ -180,6 +188,9 @@ export interface ControlPlaneStorage {
   createIssueFromMessages(input: CreateIssueFromMessagesInput): Promise<IssueDTO>;
   pullRuntimeIssues(input: PullRuntimeIssuesInput): Promise<RuntimeIssueClaimDTO[]>;
   pullRuntimeAgentMessages(input: PullRuntimeAgentMessagesInput): Promise<RuntimeAgentMessageClaimDTO[]>;
+  recordAgentActivity(input: AgentActivityEventPayload): Promise<{
+    activity: AgentActivityDTO;
+  }>;
   recordAgentIssueEvent(input: AgentIssueEventPayload): Promise<{
     issue: IssueDTO;
     message: MessageDTO | null;

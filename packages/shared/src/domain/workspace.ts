@@ -263,6 +263,7 @@ export interface ClaimRuntimeAgentMessagesInput {
 export interface RuntimeAgentMessageClaim {
   agent: AgentProfile;
   sourceMessage: Message;
+  isFirstUserMessage: boolean;
 }
 
 export interface RecordAgentMessageResponseInput {
@@ -752,6 +753,11 @@ export function claimRuntimeAgentMessages(
 
   return messages.map((message) => {
     const agent = agentsByChannelId.get(message.channelId)!;
+    const channelUserMessages = workspace.messages.filter(
+      (entry) => entry.channelId === message.channelId && entry.senderType === "user"
+    );
+    const messageIndex = channelUserMessages.findIndex((entry) => entry.id === message.id);
+    const earlierUserMessageInChannel = messageIndex > 0;
 
     workspace.agentMessageClaims.push({
       id: createId("amc"),
@@ -773,7 +779,8 @@ export function claimRuntimeAgentMessages(
 
     return {
       agent,
-      sourceMessage: message
+      sourceMessage: message,
+      isFirstUserMessage: !earlierUserMessageInChannel
     };
   });
 }

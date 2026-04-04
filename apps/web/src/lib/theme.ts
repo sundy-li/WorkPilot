@@ -49,7 +49,7 @@ export function getMessageSurfaceClass(tone: ActorTone, isSelected: boolean) {
     "message-surface",
     "message-surface--frame-on-hover",
     `message-surface--${tone}`,
-    isSelected ? "message-surface--selected" : "message-surface--idle"
+    "message-surface--idle"
   ].join(" ");
 }
 

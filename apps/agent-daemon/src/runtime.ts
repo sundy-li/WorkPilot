@@ -6,6 +6,7 @@ import {
   getWorkspaceBootstrap,
   pullRuntimeAgentMessages,
   pullRuntimeIssues,
+  recordAgentActivity,
   recordAgentMessageResponse,
   recordAgentIssueEvent,
   registerRuntimeDaemon,
@@ -19,6 +20,7 @@ import {
   type PullRuntimeIssuesInput,
   type RegisterRuntimeDaemonInput,
   type AgentIssueEventResponse,
+  type AgentActivityEventResponse,
   type SendRuntimeHeartbeatInput
 } from "./client";
 import { createFileDaemonStateStore, type DaemonState, type DaemonStateStore } from "./state";
@@ -68,12 +70,14 @@ interface DaemonRuntimeDependencies {
   recordAgentIssueEvent?: (
     input: DaemonFetchContextualIssueEventInput
   ) => Promise<AgentIssueEventResponse>;
+  recordAgentActivity?: (input: DaemonFetchContextualAgentActivityInput) => Promise<AgentActivityEventResponse>;
   recordAgentMessageResponse?: (
     input: DaemonFetchContextualAgentMessageInput
   ) => Promise<AgentMessageEventResponse>;
 }
 
 type DaemonFetchContextualIssueEventInput = Parameters<typeof recordAgentIssueEvent>[0];
+type DaemonFetchContextualAgentActivityInput = Parameters<typeof recordAgentActivity>[0];
 type DaemonFetchContextualAgentMessageInput = Parameters<typeof recordAgentMessageResponse>[0];
 
 export interface DaemonRuntime {
@@ -105,6 +109,7 @@ export function createDaemonRuntime(
   const loadRuntimeIssues = dependencies.pullRuntimeIssues ?? pullRuntimeIssues;
   const loadRuntimeAgentMessages = dependencies.pullRuntimeAgentMessages ?? pullRuntimeAgentMessages;
   const sendIssueEvent = dependencies.recordAgentIssueEvent ?? recordAgentIssueEvent;
+  const sendActivityEvent = dependencies.recordAgentActivity ?? recordAgentActivity;
   const sendAgentMessageResponse = dependencies.recordAgentMessageResponse ?? recordAgentMessageResponse;
   const providedAgentHost = dependencies.agentHost ?? null;
 
@@ -383,6 +388,14 @@ export function createDaemonRuntime(
         agentId: claim.agent.id,
         agentName: claim.agent.name
       });
+      await sendActivityEvent({
+        controlPlaneUrl: config.controlPlaneUrl,
+        fetcher: dependencies.fetcher,
+        agentId: claim.agent.id,
+        status: "running",
+        summary: `${claim.agent.implementation === "codex" ? "Codex CLI" : claim.agent.name} is working on "${claim.issue.title}".`,
+        detail: "Executing delegated issue work."
+      });
       const result = await runtime.runAgentPrompt(claim.agent.id, buildIssuePrompt(claim));
 
       console.log("[daemon] issue claim completed", {
@@ -402,6 +415,14 @@ export function createDaemonRuntime(
           result.responseText.trim() ||
           `Issue "${claim.issue.title}" completed in session ${result.sessionId} via ${result.implementationPackage}.`
       });
+      await sendActivityEvent({
+        controlPlaneUrl: config.controlPlaneUrl,
+        fetcher: dependencies.fetcher,
+        agentId: claim.agent.id,
+        status: "idle",
+        summary: `${claim.agent.name} is ready for the next task.`,
+        detail: `Last issue finished in session ${result.sessionId}.`
+      });
     } catch (error) {
       console.error("[daemon] issue claim failed", {
         runtimeId: state?.runtimeId ?? null,
@@ -417,6 +438,14 @@ export function createDaemonRuntime(
         status: "todo",
         message: error instanceof Error ? error.message : "Agent issue execution failed."
       });
+      await sendActivityEvent({
+        controlPlaneUrl: config.controlPlaneUrl,
+        fetcher: dependencies.fetcher,
+        agentId: claim.agent.id,
+        status: "idle",
+        summary: `${claim.agent.name} returned to idle after an issue failure.`,
+        detail: error instanceof Error ? error.message : "Agent issue execution failed."
+      });
     }
   }
 
@@ -430,6 +459,14 @@ export function createDaemonRuntime(
         channelId: claim.sourceMessage.channelId,
         senderId: claim.sourceMessage.senderId,
         preview: claim.sourceMessage.content.slice(0, 120)
+      });
+      await sendActivityEvent({
+        controlPlaneUrl: config.controlPlaneUrl,
+        fetcher: dependencies.fetcher,
+        agentId: claim.agent.id,
+        status: "running",
+        summary: `${claim.agent.implementation === "codex" ? "Codex CLI" : claim.agent.name} is replying in chat.`,
+        detail: `Working on message ${claim.sourceMessage.id}.`
       });
       const result = await runtime.runAgentPrompt(claim.agent.id, buildDirectMessagePrompt(claim));
 
@@ -449,6 +486,14 @@ export function createDaemonRuntime(
           result.responseText.trim() ||
           `Completed response in session ${result.sessionId} via ${result.implementationPackage}.`
       });
+      await sendActivityEvent({
+        controlPlaneUrl: config.controlPlaneUrl,
+        fetcher: dependencies.fetcher,
+        agentId: claim.agent.id,
+        status: "idle",
+        summary: `${claim.agent.name} is ready for the next instruction.`,
+        detail: `Last reply completed in session ${result.sessionId}.`
+      });
       console.log("[daemon] direct message response recorded", {
         runtimeId: state?.runtimeId ?? null,
         agentId: claim.agent.id,
@@ -467,6 +512,14 @@ export function createDaemonRuntime(
         agentId: claim.agent.id,
         sourceMessageId: claim.sourceMessage.id,
         content: error instanceof Error ? error.message : "Agent message execution failed."
+      });
+      await sendActivityEvent({
+        controlPlaneUrl: config.controlPlaneUrl,
+        fetcher: dependencies.fetcher,
+        agentId: claim.agent.id,
+        status: "idle",
+        summary: `${claim.agent.name} returned to idle after a chat failure.`,
+        detail: error instanceof Error ? error.message : "Agent message execution failed."
       });
       console.log("[daemon] direct message failure recorded", {
         runtimeId: state?.runtimeId ?? null,
@@ -494,10 +547,22 @@ export function createDaemonRuntime(
 
   function buildDirectMessagePrompt(claim: RuntimeAgentMessageClaimDTO) {
     return [
-      `You are ${claim.agent.name}.`,
+      claim.isFirstUserMessage
+        ? [
+            "Authoritative agent profile for this conversation:",
+            `- Workspace agent record name: ${claim.agent.name}`,
+            claim.agent.description ? `- Owner-defined prompt constraint: ${claim.agent.description}` : null,
+            "- Follow the owner-defined profile above as the highest-priority in-chat identity and behavior for this session.",
+            "- If the user asks your name, role, or what you help with, answer from the owner-defined profile above instead of generic platform defaults."
+          ]
+            .filter(Boolean)
+            .join("\n")
+        : null,
       "Reply naturally in this direct conversation with the user.",
       `User message: ${claim.sourceMessage.content}`
-    ].join("\n\n");
+    ]
+      .filter(Boolean)
+      .join("\n\n");
   }
 
   return runtime;

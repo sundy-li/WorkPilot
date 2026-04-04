@@ -185,6 +185,35 @@ bun run --cwd apps/web build
 - **Testing**: Add failing test first, then implement
 - **Persistence**: Control-plane uses Postgres when available; daemon identity survives restart
 
+## Agent Constraints
+
+When modifying code, you **MUST** follow these rules:
+
+### 1. Documentation Updates
+If you change architecture, add new features, or modify APIs:
+- Update `AGENTS.md` to reflect the new behavior
+- Update `docs/architect.md` with any architectural changes
+
+### 2. Code Minimalism
+- **Always delete dead code** - unused functions, commented-out logic, obsolete imports
+- **Remove unused files** - if a file is no longer imported, delete it
+- **Simplify designs** - if a feature can be done in fewer files/lines, refactor it
+- **No over-engineering** - don't add abstraction layers unless there's clear duplication
+
+### 3. Review Checklist
+Before submitting any changes:
+- [ ] Check if AGENTS.md or architect.md needs updating
+- [ ] Run `bun run typecheck` to ensure no type errors
+- [ ] Run `bun test` to ensure tests pass
+- [ ] Verify no unused imports or dead code was introduced
+- [ ] Ensure the change is minimal and focused
+
+### 4. Architecture Principles
+- Keep the codebase **lean** - less code means less bugs
+- **YAGNI** - don't implement features "for future use"
+- **Single responsibility** - each file/module has one clear purpose
+- **Explicit over implicit** - clear naming and documentation
+
 ## Current Gaps
 
 - Full Postgres repository coverage

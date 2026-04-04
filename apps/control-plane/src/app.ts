@@ -95,12 +95,24 @@ export function createControlPlaneApp(options: CreateControlPlaneAppOptions = {}
   });
 
   app.get("/channels/:channelId/messages", async (context) => {
-    const messages = await storage.getMessages(context.req.param("channelId"));
-    const channel = await storage.getChannel(context.req.param("channelId"));
+    const channelId = context.req.param("channelId");
+    const organizationId = context.req.query("organizationId") ?? "org_demo";
+    const messages = await storage.getMessages({
+      channelId,
+      after: context.req.query("after") ?? undefined
+    });
+    const channel = await storage.getChannel(channelId);
     if (!channel) {
       return context.json({ error: "Channel not found." }, 404);
     }
-    return context.json({ messages });
+    const workspace = await storage.getWorkspaceBootstrap(organizationId);
+    const channelAgentIds = new Set(
+      workspace.agents.filter((agent) => agent.channelId === channelId).map((agent) => agent.id)
+    );
+    return context.json({
+      messages,
+      agentActivities: workspace.agentActivities.filter((activity) => channelAgentIds.has(activity.agentId))
+    });
   });
 
   app.get("/organizations/:orgId/runtimes", async (context) => {
@@ -122,7 +134,8 @@ export function createControlPlaneApp(options: CreateControlPlaneAppOptions = {}
   });
 
   app.get("/bootstrap/workspace", async (context) => {
-    return context.json(await storage.getWorkspaceBootstrap("org_demo"));
+    const organizationId = context.req.query("organizationId") ?? "org_demo";
+    return context.json(await storage.getWorkspaceBootstrap(organizationId));
   });
 
   app.post("/organizations/:orgId/runtime-registration-tokens", async (context) => {
@@ -290,6 +303,7 @@ export function createControlPlaneApp(options: CreateControlPlaneAppOptions = {}
       }>;
       senderId: string;
       senderType: "user" | "agent" | "system";
+      occurredAt?: string;
     };
 
     try {
@@ -298,7 +312,8 @@ export function createControlPlaneApp(options: CreateControlPlaneAppOptions = {}
         content: body.content,
         attachments: body.attachments ?? [],
         senderId: body.senderId,
-        senderType: body.senderType
+        senderType: body.senderType,
+        occurredAt: body.occurredAt
       });
       return context.json({ message }, 201);
     } catch (error) {
@@ -470,6 +485,25 @@ export function createControlPlaneApp(options: CreateControlPlaneAppOptions = {}
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error.";
       const status = message === "Issue was not found." || message === "Agent was not found." ? 404 : 400;
+      return context.json({ error: message }, status);
+    }
+  });
+
+  app.post("/agent/activity-events", async (context) => {
+    const body = (await context.req.json()) as {
+      agentId: string;
+      status: "idle" | "running";
+      summary: string;
+      detail?: string;
+      occurredAt?: string;
+    };
+
+    try {
+      const result = await storage.recordAgentActivity(body);
+      return context.json(result);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error.";
+      const status = message === "Agent was not found." ? 404 : 400;
       return context.json({ error: message }, status);
     }
   });

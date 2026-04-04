@@ -1,4 +1,5 @@
 import type {
+  AgentActivityEventPayload,
   AgentControlActionDTO,
   AgentIssueEventPayload,
   AgentMessageResponsePayload,
@@ -92,6 +93,16 @@ export interface AgentMessageEventResponse {
   message: RuntimeAgentMessageClaimDTO["sourceMessage"];
 }
 
+export interface AgentActivityEventResponse {
+  activity: {
+    agentId: string;
+    status: "idle" | "running";
+    summary: string;
+    detail: string | null;
+    updatedAt: string;
+  };
+}
+
 export async function registerRuntimeDaemon(input: RegisterRuntimeDaemonInput): Promise<RegisteredRuntimeDaemon> {
   return requestJson<RegisteredRuntimeDaemon>(input, "/runtime/register", {
     method: "POST",
@@ -172,6 +183,21 @@ export async function recordAgentIssueEvent(input: DaemonFetchContext & AgentIss
       issueId: input.issueId,
       status: input.status,
       message: input.message,
+      occurredAt: input.occurredAt
+    })
+  });
+}
+
+export async function recordAgentActivity(
+  input: DaemonFetchContext & AgentActivityEventPayload
+): Promise<AgentActivityEventResponse> {
+  return requestJson<AgentActivityEventResponse>(input, "/agent/activity-events", {
+    method: "POST",
+    body: JSON.stringify({
+      agentId: input.agentId,
+      status: input.status,
+      summary: input.summary,
+      detail: input.detail,
       occurredAt: input.occurredAt
     })
   });

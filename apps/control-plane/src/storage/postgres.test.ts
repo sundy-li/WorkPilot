@@ -222,6 +222,7 @@ describe("postgres control-plane storage", () => {
     expect(claims).toHaveLength(1);
     expect(claims[0]?.agent.id).toBe("agt_seed");
     expect(claims[0]?.sourceMessage.id).toBe(userMessage.id);
+    expect(claims[0]?.isFirstUserMessage).toBe(true);
 
     const response = await storage.recordAgentMessageResponse({
       agentId: "agt_seed",

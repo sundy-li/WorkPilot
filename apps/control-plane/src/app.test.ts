@@ -148,6 +148,45 @@ describe("control-plane app", () => {
     expect(heartbeatPayload.runtime.status).toBe("online");
   });
 
+  test("persists agent activity events in workspace bootstrap", async () => {
+    const app = createControlPlaneApp();
+
+    const activityResponse = await app.request("/agent/activity-events", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        agentId: "agt_seed",
+        status: "running",
+        summary: "Codex CLI is applying repository changes.",
+        detail: "Streaming tool output",
+        occurredAt: "2025-04-03T22:19:08.000Z"
+      })
+    });
+
+    expect(activityResponse.status).toBe(200);
+
+    const bootstrapResponse = await app.request("/bootstrap/workspace");
+    const bootstrapPayload = (await bootstrapResponse.json()) as {
+      agentActivities?: Array<{
+        agentId: string;
+        status: string;
+        summary: string;
+        detail: string | null;
+        updatedAt: string;
+      }>;
+    };
+
+    expect(bootstrapPayload.agentActivities).toContainEqual({
+      agentId: "agt_seed",
+      status: "running",
+      summary: "Codex CLI is applying repository changes.",
+      detail: "Streaming tool output",
+      updatedAt: "2025-04-03T22:19:08.000Z"
+    });
+  });
+
   test("allows the same runtime key to reuse a registration token across restarts", async () => {
     const app = createControlPlaneApp();
 
@@ -365,6 +404,74 @@ describe("control-plane app", () => {
     });
 
     expect(messageResponse.status).toBe(201);
+  });
+
+  test("loads channel messages incrementally from a timestamp cursor", async () => {
+    const app = createControlPlaneApp();
+
+    await app.request("/channels/chn_general/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        content: "Earlier note",
+        senderId: "usr_admin",
+        senderType: "user",
+        occurredAt: "2025-04-03T22:18:08.000Z"
+      })
+    });
+
+    await app.request("/channels/chn_general/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        content: "Latest note",
+        senderId: "usr_admin",
+        senderType: "user",
+        occurredAt: "2025-04-03T22:20:08.000Z"
+      })
+    });
+
+    const response = await app.request("/channels/chn_general/messages?after=2025-04-03T22:19:00.000Z");
+    const payload = (await response.json()) as {
+      messages: Array<{ content: string }>;
+    };
+
+    expect(response.status).toBe(200);
+    expect(payload.messages.map((message) => message.content)).toContain("Latest note");
+    expect(payload.messages.map((message) => message.content)).not.toContain("Earlier note");
+  });
+
+  test("includes direct-thread agent activity alongside channel messages", async () => {
+    const app = createControlPlaneApp();
+
+    await app.request("/agent/activity-events", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        agentId: "agt_seed",
+        status: "running",
+        summary: "Codex CLI is replying in chat.",
+        detail: "Working on message msg_123",
+        occurredAt: "2025-04-03T22:21:08.000Z"
+      })
+    });
+
+    const response = await app.request("/channels/dir_admin_ops/messages");
+    const payload = (await response.json()) as {
+      agentActivities?: Array<{ agentId: string; status: string; summary: string }>;
+    };
+
+    expect(payload.agentActivities?.[0]).toMatchObject({
+      agentId: "agt_seed",
+      status: "running",
+      summary: "Codex CLI is replying in chat."
+    });
   });
 
   test("soft deletes a runtime and hides its agents from workspace bootstrap", async () => {
@@ -880,6 +987,7 @@ describe("control-plane app", () => {
       claims: Array<{
         agent: { id: string; channelId: string };
         sourceMessage: { id: string; channelId: string; content: string };
+        isFirstUserMessage: boolean;
       }>;
     };
 
@@ -887,6 +995,7 @@ describe("control-plane app", () => {
     expect(pullPayload.claims[0]?.agent.id).toBe("agt_seed");
     expect(pullPayload.claims[0]?.sourceMessage.id).toBe(messagePayload.message.id);
     expect(pullPayload.claims[0]?.sourceMessage.channelId).toBe(directChannelPayload.channel.id);
+    expect(pullPayload.claims[0]?.isFirstUserMessage).toBe(true);
 
     const respondResponse = await app.request("/agent/message-events", {
       method: "POST",

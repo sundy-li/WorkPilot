@@ -434,6 +434,7 @@ describe("workspace domain", () => {
     expect(claims).toHaveLength(1);
     expect(claims[0]?.agent.id).toBe(agent.id);
     expect(claims[0]?.sourceMessage.id).toBe(message.id);
+    expect(claims[0]?.isFirstUserMessage).toBe(true);
 
     const secondClaims = claimRuntimeAgentMessages(workspace, {
       runtimeId: runtime.id,
@@ -442,6 +443,60 @@ describe("workspace domain", () => {
     });
 
     expect(secondClaims).toEqual([]);
+  });
+
+  test("marks only the first direct user message as the first conversation turn", () => {
+    const workspace = createWorkspaceSnapshot({
+      organizationId: "org_123"
+    });
+
+    const token = createRuntimeRegistrationToken(workspace, {
+      actorId: "usr_admin",
+      actorRole: "admin"
+    });
+
+    const runtime = registerRuntimeDaemon(workspace, {
+      registrationToken: token.token,
+      runtimeName: "ops-runtime",
+      runtimeKey: "runtime_001"
+    });
+
+    const agent = createAgentProfile(workspace, {
+      runtimeId: runtime.id,
+      name: "Coder",
+      description: "Writes repository changes."
+    });
+
+    createMessage(workspace, {
+      channelId: agent.channelId,
+      content: "First question",
+      senderId: "usr_123",
+      senderType: "user",
+      now: "2025-01-01T00:05:00.000Z"
+    });
+
+    claimRuntimeAgentMessages(workspace, {
+      runtimeId: runtime.id,
+      limit: 10,
+      now: "2025-01-01T00:06:00.000Z"
+    });
+
+    createMessage(workspace, {
+      channelId: agent.channelId,
+      content: "Second question",
+      senderId: "usr_123",
+      senderType: "user",
+      now: "2025-01-01T00:07:00.000Z"
+    });
+
+    const secondClaims = claimRuntimeAgentMessages(workspace, {
+      runtimeId: runtime.id,
+      limit: 10,
+      now: "2025-01-01T00:08:00.000Z"
+    });
+
+    expect(secondClaims).toHaveLength(1);
+    expect(secondClaims[0]?.isFirstUserMessage).toBe(false);
   });
 
   test("records agent direct-message responses on the same thread", () => {

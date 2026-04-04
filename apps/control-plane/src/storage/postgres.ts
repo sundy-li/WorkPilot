@@ -1,5 +1,6 @@
 import { SQL } from "bun";
 import type {
+  AgentActivityDTO,
   AgentControlActionDTO,
   AgentIdentity,
   RuntimeIssueClaimDTO,
@@ -51,6 +52,7 @@ export async function createPostgresControlPlaneStorage(
     email: "admin@workpilot.local",
     role: "admin"
   };
+  const agentActivitiesByOrganization = new Map<string, Map<string, AgentActivityDTO>>();
 
   const getOrganization = async (orgId: string) => {
     const [organization] = await sql<{ id: string }[]>`select id from organizations where id = ${orgId} limit 1`;
@@ -90,11 +92,12 @@ export async function createPostgresControlPlaneStorage(
     return rows.map((row) => ({ ...row, unreadCount: 0 }));
   };
 
-  const getMessages = async (channelId: string) => {
+  const getMessages = async (channelId: string, after?: string) => {
     return sql<MessageDTO[]>`
       select id, channel_id as "channelId", content, attachments, sender_id as "senderId", sender_type as "senderType", created_at as "createdAt"
       from messages
       where channel_id = ${channelId}
+        and (${after ?? null}::timestamptz is null or created_at > ${after ?? null}::timestamptz)
       order by created_at asc
     `;
   };
@@ -210,8 +213,8 @@ export async function createPostgresControlPlaneStorage(
         unreadCount: 0
       };
     },
-    async getMessages(channelId) {
-      return getMessages(channelId);
+    async getMessages(input) {
+      return getMessages(input.channelId, input.after);
     },
     async getRuntimes(orgId) {
       return getRuntimes(orgId);
@@ -255,6 +258,9 @@ export async function createPostgresControlPlaneStorage(
         channels,
         runtimes,
         agents,
+        agentActivities: [...(agentActivitiesByOrganization.get(orgId)?.values() ?? [])]
+          .filter((activity) => agents.some((agent) => agent.id === activity.agentId))
+          .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt)),
         messages: messages.filter((message) => visibleChannelIds.has(message.channelId)),
         issues
       } satisfies WorkspaceBootstrapPayload;
@@ -663,8 +669,8 @@ export async function createPostgresControlPlaneStorage(
         ...attachment
       }));
       const [message] = await sql<MessageDTO[]>`
-        insert into messages (id, organization_id, channel_id, sender_id, sender_type, content, attachments)
-        values (${createId("msg")}, ${channel.organization_id}, ${input.channelId}, ${input.senderId}, ${input.senderType}, ${input.content}, ${JSON.stringify(attachments)}::jsonb)
+        insert into messages (id, organization_id, channel_id, sender_id, sender_type, content, attachments, created_at)
+        values (${createId("msg")}, ${channel.organization_id}, ${input.channelId}, ${input.senderId}, ${input.senderType}, ${input.content}, ${JSON.stringify(attachments)}::jsonb, ${input.occurredAt ?? new Date().toISOString()})
         returning id, channel_id as "channelId", content, attachments, sender_id as "senderId", sender_type as "senderType", created_at as "createdAt"
       `;
       return message;
@@ -1058,6 +1064,33 @@ export async function createPostgresControlPlaneStorage(
         message
       };
     },
+    async recordAgentActivity(input) {
+      const [agent] = await sql<Array<{ id: string; organizationId: string }>>`
+        select id, organization_id as "organizationId"
+        from agents
+        where id = ${input.agentId}
+          and status <> 'deleted'
+        limit 1
+      `;
+      if (!agent) {
+        throw new Error("Agent was not found.");
+      }
+
+      const activities = agentActivitiesByOrganization.get(agent.organizationId) ?? new Map<string, AgentActivityDTO>();
+      const activity: AgentActivityDTO = {
+        agentId: input.agentId,
+        status: input.status,
+        summary: input.summary,
+        detail: input.detail ?? null,
+        updatedAt: input.occurredAt ?? new Date().toISOString()
+      };
+      activities.set(input.agentId, activity);
+      agentActivitiesByOrganization.set(agent.organizationId, activities);
+
+      return {
+        activity
+      };
+    },
     async pullRuntimeAgentMessages(input) {
       const claimedAt = input.occurredAt ?? new Date().toISOString();
       const claims = await sql<
@@ -1078,6 +1111,7 @@ export async function createPostgresControlPlaneStorage(
           sourceSenderId: string;
           sourceSenderType: MessageDTO["senderType"];
           sourceCreatedAt: string;
+          isFirstUserMessage: boolean;
         }>
       >`
         with candidate_messages as (
@@ -1139,7 +1173,14 @@ export async function createPostgresControlPlaneStorage(
           m.attachments as "sourceAttachments",
           m.sender_id as "sourceSenderId",
           m.sender_type as "sourceSenderType",
-          m.created_at as "sourceCreatedAt"
+          m.created_at as "sourceCreatedAt",
+          not exists (
+            select 1
+            from messages earlier
+            where earlier.channel_id = m.channel_id
+              and earlier.sender_type = 'user'
+              and earlier.created_at < m.created_at
+          ) as "isFirstUserMessage"
         from inserted_claims c
         join agents a on a.id = c.agent_id
         join messages m on m.id = c.source_message_id
@@ -1166,7 +1207,8 @@ export async function createPostgresControlPlaneStorage(
           senderId: claim.sourceSenderId,
           senderType: claim.sourceSenderType,
           createdAt: claim.sourceCreatedAt
-        }
+        },
+        isFirstUserMessage: claim.isFirstUserMessage
       }));
     },
     async recordAgentMessageResponse(input) {

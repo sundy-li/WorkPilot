@@ -14,6 +14,14 @@ interface OpenDetailPanelInput {
 }
 
 export function openDetailPanel(_current: DetailPanelState, input: OpenDetailPanelInput): DetailPanelState {
+  if (input.kind === "message") {
+    return {
+      isOpen: false,
+      kind: null,
+      itemId: null
+    };
+  }
+
   return {
     isOpen: true,
     kind: input.kind,

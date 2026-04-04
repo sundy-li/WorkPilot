@@ -31,7 +31,7 @@ describe("workpilot api client", () => {
       fetcher: app.fetch
     });
 
-    const payload = await client.getWorkspaceBootstrap();
+    const payload = await client.getWorkspaceBootstrap("org_demo");
 
     expect(payload.organization?.id).toBe("org_demo");
     expect(payload.channels.length).toBeGreaterThan(0);
@@ -54,6 +54,36 @@ describe("workpilot api client", () => {
 
     expect(payload.runtimes.length).toBeGreaterThan(0);
     expect(payload.runtimes[0]?.id).toBe("rtm_seed");
+  });
+
+  test("loads channel messages after a timestamp cursor", async () => {
+    const app = createControlPlaneApp({
+      controlPlaneUrl: "http://control-plane.local"
+    });
+
+    const client = createWorkPilotApiClient({
+      baseUrl: "http://control-plane.local",
+      fetcher: app.fetch
+    });
+
+    await app.request("/channels/chn_general/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        content: "Fresh update",
+        senderId: "usr_admin",
+        senderType: "user",
+        occurredAt: "2025-04-03T22:20:08.000Z"
+      })
+    });
+
+    const payload = await client.getChannelMessages("chn_general", {
+      after: "2025-04-03T22:19:00.000Z"
+    });
+
+    expect(payload.messages.some((message) => message.content === "Fresh update")).toBe(true);
   });
 
   test("creates a channel through the control-plane", async () => {
@@ -93,7 +123,7 @@ describe("workpilot api client", () => {
     expect(result.agent?.id).toBe("agt_seed");
     expect(result.agent?.status).toBe("stopped");
 
-    const payload = await client.getWorkspaceBootstrap();
+    const payload = await client.getWorkspaceBootstrap("org_demo");
 
     expect(payload.agents.find((agent) => agent.id === "agt_seed")?.status).toBe("stopped");
   });

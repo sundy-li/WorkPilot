@@ -25,6 +25,16 @@ export interface RuntimeIdentity {
   status: RuntimeDaemon["status"];
 }
 
+export type AgentActivityStatus = "idle" | "running";
+
+export interface AgentActivityDTO {
+  agentId: string;
+  status: AgentActivityStatus;
+  summary: string;
+  detail: string | null;
+  updatedAt: string;
+}
+
 export interface AgentIdentity {
   id: string;
   runtimeId: string;
@@ -64,6 +74,14 @@ export interface AgentIssueEventPayload {
   occurredAt?: string;
 }
 
+export interface AgentActivityEventPayload {
+  agentId: string;
+  status: AgentActivityStatus;
+  summary: string;
+  detail?: string;
+  occurredAt?: string;
+}
+
 export interface AgentControlRequest {
   action: AgentControlActionType;
   restartMode?: AgentRestartMode;
@@ -89,6 +107,7 @@ export interface RuntimeIssueClaimDTO {
 export interface RuntimeAgentMessageClaimDTO {
   agent: AgentIdentity;
   sourceMessage: MessageDTO;
+  isFirstUserMessage: boolean;
 }
 
 export interface AgentMessageResponsePayload {
@@ -105,6 +124,7 @@ export interface WorkspaceBootstrapPayload {
   channels: ChannelSummary[];
   runtimes: RuntimeIdentity[];
   agents: AgentIdentity[];
+  agentActivities: AgentActivityDTO[];
   messages: MessageDTO[];
   issues: IssueDTO[];
 }

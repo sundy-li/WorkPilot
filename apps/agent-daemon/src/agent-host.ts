@@ -100,6 +100,7 @@ export function createSandboxAgentHost(options: SandboxAgentHostOptions): Daemon
 
   async function writeAgentFiles(agent: AgentIdentity) {
     const agentRoot = join(runtimeRoot, agent.id);
+    const agentPromptMarkdown = `# ${agent.name}\n\n${agent.description}\n`;
 
     await mkdir(agentRoot, {
       recursive: true
@@ -118,7 +119,12 @@ export function createSandboxAgentHost(options: SandboxAgentHostOptions): Daemon
     );
     await writeFile(
       join(agentRoot, "AGENT.md"),
-      `# ${agent.name}\n\n${agent.description}\n`,
+      agentPromptMarkdown,
+      "utf8"
+    );
+    await writeFile(
+      join(agentRoot, "AGENTS.md"),
+      agentPromptMarkdown,
       "utf8"
     );
   }

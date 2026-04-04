@@ -8,17 +8,17 @@ import {
 } from "./workspace-browser";
 
 describe("workspace browser", () => {
-  test("defaults the agent workspace to detail mode", () => {
+  test("defaults the agent workspace to chat mode", () => {
     expect(createInitialAgentWorkspaceBrowserState("agt_seed")).toEqual({
       agentId: "agt_seed",
-      mode: "detail"
+      mode: "chat"
     });
   });
 
-  test("selecting another agent resets the workspace back to detail mode", () => {
+  test("selecting another agent resets the workspace back to chat mode", () => {
     expect(selectAgentWorkspaceTarget("agt_reviewer")).toEqual({
       agentId: "agt_reviewer",
-      mode: "detail"
+      mode: "chat"
     });
   });
 
@@ -27,7 +27,7 @@ describe("workspace browser", () => {
       setAgentWorkspaceMode(
         {
           agentId: "agt_seed",
-          mode: "detail"
+          mode: "chat"
         },
         "chat"
       )

@@ -230,6 +230,7 @@ describe("agent daemon client", () => {
     expect(claims.claims[0]?.agent.id).toBe("agt_seed");
     expect(claims.claims[0]?.agent.channelId).toBe("dir_admin_ops");
     expect(claims.claims[0]?.sourceMessage.id).toBe(messagePayload.message.id);
+    expect(claims.claims[0]?.isFirstUserMessage).toBe(true);
 
     const event = await recordAgentMessageResponse({
       controlPlaneUrl: "http://control-plane.local",

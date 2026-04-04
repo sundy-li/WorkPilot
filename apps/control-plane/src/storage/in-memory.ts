@@ -1,4 +1,5 @@
 import {
+  type AgentActivityDTO,
   acknowledgeAgentControlAction,
   claimRuntimeIssues,
   createAgentProfile,
@@ -36,6 +37,7 @@ export function createInMemoryControlPlaneStorage(): ControlPlaneStorage {
   const workspaces = createSeedState();
   const channelsByOrganization = createSeedChannels();
   const channelParticipantsByOrganization = createSeedChannelParticipants();
+  const agentActivitiesByOrganization = new Map<string, Map<string, AgentActivityDTO>>();
   const demoSession: AuthSession = {
     userId: "usr_admin",
     organizationId: "org_demo",
@@ -65,10 +67,14 @@ export function createInMemoryControlPlaneStorage(): ControlPlaneStorage {
       channelsByOrganization.set(workspace.organization.id, [...channels, channel]);
       return channel;
     },
-    async getMessages(channelId) {
-      const workspace = findWorkspaceByChannel(workspaces, channelsByOrganization, channelId);
+    async getMessages(input) {
+      const workspace = findWorkspaceByChannel(workspaces, channelsByOrganization, input.channelId);
       return workspace?.messages
-        .filter((message) => message.channelId === channelId)
+        .filter(
+          (message) =>
+            message.channelId === input.channelId &&
+            (!input.after || Date.parse(message.createdAt) > Date.parse(input.after))
+        )
         .map((message) => ({
           id: message.id,
           channelId: message.channelId,
@@ -107,7 +113,7 @@ export function createInMemoryControlPlaneStorage(): ControlPlaneStorage {
     },
     async getWorkspaceBootstrap(orgId) {
       const workspace = workspaces.get(orgId);
-      return toBootstrapPayload(workspace, channelsByOrganization.get(orgId) ?? []);
+      return toBootstrapPayload(workspace, channelsByOrganization.get(orgId) ?? [], agentActivitiesByOrganization.get(orgId));
     },
     async createRuntimeRegistrationCommand(input: CreateRuntimeRegistrationCommandInput) {
       const workspace = requireWorkspace(workspaces, input.organizationId);
@@ -285,7 +291,10 @@ export function createInMemoryControlPlaneStorage(): ControlPlaneStorage {
       if (!workspace) {
         throw new Error("Channel not found.");
       }
-      const message = createMessage(workspace, input);
+      const message = createMessage(workspace, {
+        ...input,
+        now: input.occurredAt
+      });
       return {
         id: message.id,
         channelId: message.channelId,
@@ -354,6 +363,28 @@ export function createInMemoryControlPlaneStorage(): ControlPlaneStorage {
         sourceMessages: claim.sourceMessages.map((message) => toMessageDto(message))
       }));
     },
+    async recordAgentActivity(input) {
+      const workspace = findWorkspaceByAgentId(workspaces, input.agentId);
+      if (!workspace) {
+        throw new Error("Agent was not found.");
+      }
+
+      const activities = agentActivitiesByOrganization.get(workspace.organization.id) ?? new Map<string, AgentActivityDTO>();
+      const activity: AgentActivityDTO = {
+        agentId: input.agentId,
+        status: input.status,
+        summary: input.summary,
+        detail: input.detail ?? null,
+        updatedAt: input.occurredAt ?? new Date().toISOString()
+      };
+
+      activities.set(input.agentId, activity);
+      agentActivitiesByOrganization.set(workspace.organization.id, activities);
+
+      return {
+        activity
+      };
+    },
     async recordAgentIssueEvent(input) {
       const workspace = findWorkspaceByIssueId(workspaces, input.issueId);
       if (!workspace) {
@@ -416,7 +447,11 @@ export function createInMemoryControlPlaneStorage(): ControlPlaneStorage {
           return [
             {
               agent: toAgentIdentity(agent),
-              sourceMessage: toMessageDto(message)
+              sourceMessage: toMessageDto(message),
+              isFirstUserMessage:
+                workspace.messages
+                  .filter((entry) => entry.channelId === message.channelId && entry.senderType === "user")
+                  .findIndex((entry) => entry.id === message.id) === 0
             }
           ];
         });
@@ -524,7 +559,11 @@ function toControlActionDto(action: WorkspaceSnapshot["agentControlActions"][num
   };
 }
 
-function toBootstrapPayload(workspace: WorkspaceSnapshot | undefined, channels: ChannelSummary[]): WorkspaceBootstrapPayload {
+function toBootstrapPayload(
+  workspace: WorkspaceSnapshot | undefined,
+  channels: ChannelSummary[],
+  agentActivitiesById?: Map<string, AgentActivityDTO>
+): WorkspaceBootstrapPayload {
   const visibleRuntimeIds = new Set(
     workspace?.runtimes.filter((runtime) => runtime.status !== "deleted").map((runtime) => runtime.id) ?? []
   );
@@ -551,6 +590,9 @@ function toBootstrapPayload(workspace: WorkspaceSnapshot | undefined, channels: 
     agents: visibleAgents.map((agent) => ({
       ...toAgentIdentity(agent)
     })),
+    agentActivities: [...(agentActivitiesById?.values() ?? [])]
+      .filter((activity) => visibleAgentIds.has(activity.agentId))
+      .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt)),
     messages:
       workspace?.messages.filter((message) => visibleChannelIds.has(message.channelId)).map((message) => toMessageDto(message)) ?? [],
     issues: workspace?.issues.map((issue) => toIssueDto(issue)) ?? []

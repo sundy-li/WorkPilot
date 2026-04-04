@@ -31,7 +31,8 @@ describe("theme tokens", () => {
 
     expect(getMessageSurfaceClass?.("human", false)).toContain("message-surface--frame-on-hover");
     expect(getMessageSurfaceClass?.("agent", false)).toContain("message-surface--agent");
-    expect(getMessageSurfaceClass?.("agent", true)).toContain("message-surface--selected");
+    expect(getMessageSurfaceClass?.("agent", true)).toContain("message-surface--idle");
+    expect(getMessageSurfaceClass?.("agent", true)).not.toContain("message-surface--selected");
     expect(getMessageSurfaceClass?.("human", false)).toContain("message-surface--human");
   });
 

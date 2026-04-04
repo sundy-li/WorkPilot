@@ -22,6 +22,7 @@ const workspace: WorkspaceBootstrapPayload = {
     }
   ],
   agents: [],
+  agentActivities: [],
   messages: [],
   issues: []
 };
