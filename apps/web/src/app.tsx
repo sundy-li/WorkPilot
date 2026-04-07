@@ -4027,13 +4027,12 @@ export function App() {
                     return (
                       <section
                         key={lane.id}
-                        className={`flex min-h-0 flex-col rounded-2xl border-l-[3px] p-3 transition ${
+                        className={`flex min-h-0 flex-col rounded-2xl p-3 transition ${
                           isDropActive
                             ? "ring-2 ring-[color:color-mix(in_srgb,var(--accent)_30%,white)]"
                             : ""
                         }`}
                         style={{
-                          borderLeftColor: lane.color,
                           backgroundColor: lane.laneBg,
                         }}
                         onDragOver={(event) => {
