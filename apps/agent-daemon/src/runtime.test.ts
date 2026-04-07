@@ -26,8 +26,15 @@ class RecordingAgentHost implements DaemonAgentHost {
   readonly syncCalls: AgentIdentity[][] = [];
   readonly runCalls: Array<{ agentId: string; prompt: string; conversationKey?: string }> = [];
   readonly setStatusCalls: Array<{ agentId: string; status: AgentIdentity["status"] }> = [];
-  readonly restartCalls: Array<{ agentId: string; mode: "restart" | "reset_session" | "full_reset" | null }> = [];
+  readonly restartCalls: Array<{ agentId: string; mode: "restart" | "reset_session" | "reset_memory" | "full_reset" | null }> = [];
   readonly deleteCalls: string[] = [];
+  workspaceFilesByAgentId = new Map<string, Array<{
+    path: string;
+    kind: "file";
+    size: number;
+    updatedAt: string;
+    content: string;
+  }>>();
   started = false;
   stopped = false;
 
@@ -53,15 +60,15 @@ class RecordingAgentHost implements DaemonAgentHost {
       };
   }
 
-  async listWorkspaceFiles() {
-    return [];
+  async listWorkspaceFiles(agentId: string) {
+    return this.workspaceFilesByAgentId.get(agentId) ?? [];
   }
 
   async setAgentStatus(agentId: string, status: AgentIdentity["status"]) {
     this.setStatusCalls.push({ agentId, status });
   }
 
-  async restartAgent(agentId: string, mode: "restart" | "reset_session" | "full_reset" | null) {
+  async restartAgent(agentId: string, mode: "restart" | "reset_session" | "reset_memory" | "full_reset" | null) {
     this.restartCalls.push({ agentId, mode });
   }
 
@@ -680,6 +687,108 @@ describe("daemon runtime", () => {
     };
 
     expect(actionPayload.actions).toHaveLength(0);
+
+    await runtime.stop();
+  });
+
+  test("syncs refreshed workspace files immediately after reset memory control actions", async () => {
+    const app = createControlPlaneApp({
+      controlPlaneUrl: "http://control-plane.local"
+    });
+    const stateStore = new MemoryStateStore();
+    const host = new RecordingAgentHost();
+    const scheduler = new ManualScheduler();
+    const syncedWorkspaceSnapshots: Array<{ agentId: string; filePaths: string[] }> = [];
+    const runtime = createDaemonRuntime(
+      {
+        controlPlaneUrl: "http://control-plane.local",
+        registrationToken: await issueRegistrationToken(app.fetch),
+        nodeName: "ops-runtime",
+        agentKey: "runtime_001",
+        heartbeatIntervalMs: 30_000,
+        messagePollIntervalMs: 1_000,
+        statePath: "/tmp/workpilot-agent-daemon/state.json",
+        workspaceRoot: "/tmp/workpilot-agent-daemon/workspace"
+      },
+      {
+        fetcher: app.fetch,
+        stateStore,
+        agentHost: host,
+        scheduler,
+        syncAgentWorkspaceFiles: async (input) => {
+          syncedWorkspaceSnapshots.push({
+            agentId: input.agentId,
+            filePaths: input.files.map((file) => file.path).sort()
+          });
+
+          return {
+            files: input.files.map(({ content: _content, ...file }) => file)
+          };
+        }
+      }
+    );
+
+    await runtime.start();
+
+    const currentRuntimeId = (await stateStore.load())?.runtimeId;
+    expect(currentRuntimeId).toBeTruthy();
+
+    const createAgentResponse = await app.request(`/runtimes/${currentRuntimeId}/agents`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        name: "Coder",
+        description: "Writes repository changes.",
+        implementation: "codex",
+        model: "gpt-5.4",
+        reasoningEffort: "high"
+      })
+    });
+    const createAgentPayload = (await createAgentResponse.json()) as {
+      agent: AgentIdentity;
+    };
+
+    await runtime.refreshAgents();
+    host.workspaceFilesByAgentId.set(createAgentPayload.agent.id, [
+      {
+        path: "memory.md",
+        kind: "file",
+        size: 14,
+        updatedAt: "2026-04-06T00:00:00.000Z",
+        content: "# Agent Memory"
+      },
+      {
+        path: "session.json",
+        kind: "file",
+        size: 24,
+        updatedAt: "2026-04-06T00:00:01.000Z",
+        content: '{"mode":"reset_memory"}'
+      }
+    ]);
+
+    await app.request(`/agents/${createAgentPayload.agent.id}/control`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        action: "restart",
+        restartMode: "reset_memory"
+      })
+    });
+
+    await scheduler.tick(30_000);
+
+    expect(host.restartCalls).toContainEqual({
+      agentId: createAgentPayload.agent.id,
+      mode: "reset_memory"
+    });
+    expect(syncedWorkspaceSnapshots).toContainEqual({
+      agentId: createAgentPayload.agent.id,
+      filePaths: ["memory.md", "session.json"]
+    });
 
     await runtime.stop();
   });

@@ -2,7 +2,7 @@ import type { WorkspaceBootstrapPayload } from "@workpilot/shared";
 import { getDefaultChannelId, type ShellState } from "./shell-state";
 
 export type AgentLifecycleState = "running" | "stopped";
-export type AgentRestartOption = "restart" | "reset_session" | "full_reset";
+export type AgentRestartOption = "reset_session" | "reset_memory";
 
 export function getAgentLifecycleState(agentId: string, lifecycleById: Record<string, AgentLifecycleState>) {
   return lifecycleById[agentId] ?? "running";
@@ -26,19 +26,8 @@ export function applyAgentRestartOption(input: {
   channelId: string;
   option: AgentRestartOption;
 }) {
-  if (input.option !== "full_reset") {
-    return {
-      workspace: input.workspace,
-      lifecycleById: applyAgentLifecycleChange(input.lifecycleById, input.agentId, "running")
-    };
-  }
-
   return {
-    workspace: {
-      ...input.workspace,
-      messages: input.workspace.messages.filter((message) => message.channelId !== input.channelId),
-      issues: input.workspace.issues.filter((issue) => issue.sourceChannelId !== input.channelId)
-    },
+    workspace: input.workspace,
     lifecycleById: applyAgentLifecycleChange(input.lifecycleById, input.agentId, "running")
   };
 }

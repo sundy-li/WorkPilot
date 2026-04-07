@@ -64,7 +64,7 @@ packages/
 - Issue/task board with Kanban
 - Dedicated issue workspace page with editable properties and activity timeline
 - Runtime daemon connection panel
-- Agent creation and lifecycle control
+- Agent creation and lifecycle control (`start`, `stop`, `reset session`, `reset memory`, `delete`)
 - Theme switching (core, mint, amber, rose)
 
 **State Management**:
@@ -110,7 +110,9 @@ packages/
 **Agent Host** (`agent-host.ts`):
 - Installs `sandbox-agent` packages
 - Manages agent sessions
-- Enforces lifecycle (start/stop/restart/delete)
+- Enforces lifecycle (start/stop/reset session/reset memory/delete)
+- `reset session` clears cached sandbox sessions plus persisted per-conversation summaries/transcripts, while keeping long-term memory and worklog intact
+- `reset memory` recreates the agent workspace from scratch so stale local files do not survive the reset
 - Executes prompts and captures responses
 - Persists per-agent local workspace files under `~/.workpilot/agents/<agentId>/`
 - Maintains `memory.md`, `worklog.md`, and per-conversation `sessions/<conversationKey>/transcript.ndjson` plus `summary.md`

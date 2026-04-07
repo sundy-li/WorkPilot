@@ -20,7 +20,7 @@ export type IssueActivityKind =
 export type AgentImplementation = "claude" | "codex" | "opencode" | "pi";
 export type AgentReasoningEffort = "low" | "medium" | "high";
 export type AgentLifecycleState = "running" | "stopped" | "deleted";
-export type AgentRestartMode = "restart" | "reset_session" | "full_reset";
+export type AgentRestartMode = "restart" | "reset_session" | "reset_memory" | "full_reset";
 export type AgentControlActionType = "start" | "stop" | "restart" | "delete";
 
 export interface Organization {

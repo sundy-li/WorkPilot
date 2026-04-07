@@ -7,7 +7,7 @@ export interface DaemonAgentHost {
   start(): Promise<void>;
   syncAgents(agents: AgentIdentity[]): Promise<void>;
   setAgentStatus(agentId: string, status: AgentIdentity["status"]): Promise<void>;
-  restartAgent(agentId: string, mode: "restart" | "reset_session" | "full_reset" | null): Promise<void>;
+  restartAgent(agentId: string, mode: "restart" | "reset_session" | "reset_memory" | "full_reset" | null): Promise<void>;
   deleteAgent(agentId: string): Promise<void>;
   run(agent: AgentIdentity, prompt: string, options?: { conversationKey?: string }): Promise<{
     sessionId: string;
@@ -571,6 +571,21 @@ export function createAgentOsHost(options: AgentOsHostOptions): DaemonAgentHost 
       const agentRoot = getAgentWorkspaceRoot(agentId);
 
       if (mode === "full_reset") {
+        await rm(agentRoot, {
+          force: true,
+          recursive: true
+        });
+        await writeAgentFiles(agent);
+      } else if (mode === "reset_session") {
+        await rm(join(agentRoot, "sessions"), {
+          force: true,
+          recursive: true
+        });
+        await mkdir(join(agentRoot, "sessions"), {
+          recursive: true
+        });
+        await updateAgentMemorySnapshot(agent);
+      } else if (mode === "reset_memory") {
         await rm(agentRoot, {
           force: true,
           recursive: true

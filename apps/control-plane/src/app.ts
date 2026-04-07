@@ -317,7 +317,7 @@ export function createControlPlaneApp(options: CreateControlPlaneAppOptions = {}
   app.post("/agents/:agentId/control", async (context) => {
     const body = (await context.req.json()) as {
       action: "start" | "stop" | "restart" | "delete";
-      restartMode?: "restart" | "reset_session" | "full_reset";
+      restartMode?: "restart" | "reset_session" | "reset_memory" | "full_reset";
       occurredAt?: string;
     };
 

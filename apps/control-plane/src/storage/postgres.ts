@@ -404,41 +404,39 @@ export async function createPostgresControlPlaneStorage(
   };
 
   async function buildWorkspaceBootstrap(orgId: string): Promise<WorkspaceBootstrapPayload> {
-    const [organization, channels, runtimes, agents, issues, issueActivities, messages, agentRunLogs] = await Promise.all([
-      getOrganization(orgId),
-      getChannels(orgId),
-      getRuntimes(orgId),
-      getAgents(orgId),
-      sql<IssueDTO[]>`
-        select
-          id, title, description, status,
-          assignee_id as "assigneeId", creator_id as "creatorId", priority,
-          due_date as "dueDate", project, source_channel_id as "sourceChannelId",
-          discussion_channel_id as "discussionChannelId",
-          created_at as "createdAt", updated_at as "updatedAt"
-        from issues where organization_id = ${orgId} order by created_at asc
-      `,
-      sql<IssueActivityDTO[]>`
-        select
-          id, issue_id as "issueId", actor_id as "actorId", actor_type as "actorType",
-          kind, field, from_value as "fromValue", to_value as "toValue", message,
-          created_at as "createdAt"
-        from issue_activities where organization_id = ${orgId} order by created_at desc
-      `,
-      sql<MessageDTO[]>`
-        select id, channel_id as "channelId", content, attachments,
-          sender_id as "senderId", sender_type as "senderType", created_at as "createdAt"
-        from messages where organization_id = ${orgId} order by created_at asc
-      `,
-      sql<AgentRunLogDTO[]>`
-        select
-          id, agent_id as "agentId", runtime_id as "runtimeId",
-          channel_id as "channelId", issue_id as "issueId",
-          session_id as "sessionId", kind, prompt, response,
-          created_at as "createdAt"
-        from agent_run_logs where organization_id = ${orgId} order by created_at desc
-      `
-    ]);
+    const organization = await getOrganization(orgId);
+    const channels = await getChannels(orgId);
+    const runtimes = await getRuntimes(orgId);
+    const agents = await getAgents(orgId);
+    const issues = await sql<IssueDTO[]>`
+      select
+        id, title, description, status,
+        assignee_id as "assigneeId", creator_id as "creatorId", priority,
+        due_date as "dueDate", project, source_channel_id as "sourceChannelId",
+        discussion_channel_id as "discussionChannelId",
+        created_at as "createdAt", updated_at as "updatedAt"
+      from issues where organization_id = ${orgId} order by created_at asc
+    `;
+    const issueActivities = await sql<IssueActivityDTO[]>`
+      select
+        id, issue_id as "issueId", actor_id as "actorId", actor_type as "actorType",
+        kind, field, from_value as "fromValue", to_value as "toValue", message,
+        created_at as "createdAt"
+      from issue_activities where organization_id = ${orgId} order by created_at desc
+    `;
+    const messages = await sql<MessageDTO[]>`
+      select id, channel_id as "channelId", content, attachments,
+        sender_id as "senderId", sender_type as "senderType", created_at as "createdAt"
+      from messages where organization_id = ${orgId} order by created_at asc
+    `;
+    const agentRunLogs = await sql<AgentRunLogDTO[]>`
+      select
+        id, agent_id as "agentId", runtime_id as "runtimeId",
+        channel_id as "channelId", issue_id as "issueId",
+        session_id as "sessionId", kind, prompt, response,
+        created_at as "createdAt"
+      from agent_run_logs where organization_id = ${orgId} order by created_at desc
+    `;
 
     const visibleChannelIds = new Set(channels.map((c) => c.id));
     const visibleAgentIds = new Set(agents.map((a) => a.id));
@@ -465,6 +463,12 @@ export async function createPostgresControlPlaneStorage(
     async initialize() {
       const schemaSql = await readSchemaSql();
       await sql.unsafe(schemaSql);
+      await sql.unsafe(`alter table agent_control_actions drop constraint if exists agent_control_actions_restart_mode_check`);
+      await sql.unsafe(`
+        alter table agent_control_actions
+        add constraint agent_control_actions_restart_mode_check
+        check (restart_mode in ('restart', 'reset_session', 'reset_memory', 'full_reset'))
+      `);
 
       const issuesMissingDiscussionChannels = await sql<Array<{ id: string; organizationId: string; createdAt: string }>>`
         select id, organization_id as "organizationId", created_at as "createdAt"

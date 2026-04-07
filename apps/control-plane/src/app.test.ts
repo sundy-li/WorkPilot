@@ -937,6 +937,19 @@ describe("control-plane app", () => {
     expect(actionPayload.actions.map((action) => action.action)).toEqual(["stop", "restart"]);
     expect(actionPayload.actions[1]?.restartMode).toBe("full_reset");
 
+    const resetMemoryResponse = await app.request(`/agents/${createAgentPayload.agent.id}/control`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        action: "restart",
+        restartMode: "reset_memory"
+      })
+    });
+
+    expect(resetMemoryResponse.status).toBe(202);
+
     const ackResponse = await app.request(`/control-actions/${actionPayload.actions[0]?.id}/ack`, {
       method: "POST",
       headers: {

@@ -84,7 +84,7 @@ A React-based IM workbench built with:
 - Agent workspace browser for inspecting synced `memory.md`, `worklog.md`, and session files
 - Issue/task rail with Kanban-style display plus a dedicated issue workspace page for editing and activity review
 - Runtime daemon connection panel
-- Agent creation and lifecycle control
+- Agent creation and lifecycle control (`start`, `stop`, `reset session`, `reset memory`, `delete`)
 - Theme switching (core, mint, amber, rose)
 
 **Entry Points:**
@@ -128,7 +128,7 @@ A Bun + Hono HTTP API server providing:
 
 **Agent Routes:**
 - `POST /runtimes/:runtimeId/agents` - Create agent
-- `POST /agents/:agentId/control` - Agent lifecycle control (start/stop/restart/delete)
+- `POST /agents/:agentId/control` - Agent lifecycle control (start/stop/restart/delete, including `reset_session` and `reset_memory` restart modes)
 - `GET /agents/:agentId/workspace-files` - List synced agent workspace files
 - `GET /agents/:agentId/workspace-files/content?path=...` - Read one synced agent workspace file
 - `GET /runtimes/:runtimeId/control-actions` - Poll control actions
@@ -175,7 +175,9 @@ A Bun-based runtime daemon that:
 **Agent Host (`agent-host.ts`):**
 - Manages `sandbox-agent` package installation
 - Creates and manages agent sessions
-- Enforces agent lifecycle (start/stop/restart/delete)
+- Enforces agent lifecycle (start/stop/reset session/reset memory/delete)
+- `reset session` clears cached sandbox sessions plus persisted per-conversation summaries/transcripts, while preserving long-term memory and worklog
+- `reset memory` recreates the agent workspace from scratch so stale local files do not survive the reset
 - Handles prompt execution and response capture
 - Persists a stable local agent workspace under `~/.workpilot/agents/<agentId>/`
 - Maintains `memory.md`, `worklog.md`, and per-conversation `sessions/<conversationKey>/transcript.ndjson` plus `summary.md`

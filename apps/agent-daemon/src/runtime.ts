@@ -408,6 +408,7 @@ export function createDaemonRuntime(
         await host.setAgentStatus(action.agentId, action.action === "start" ? "running" : "stopped");
       } else if (action.action === "restart") {
         await host.restartAgent(action.agentId, action.restartMode);
+        await syncAgentWorkspaceSnapshot(action.agentId);
       } else if (action.action === "delete") {
         await host.deleteAgent(action.agentId);
       }

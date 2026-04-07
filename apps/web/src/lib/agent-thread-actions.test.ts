@@ -96,18 +96,18 @@ describe("agent thread actions", () => {
     expect(getAgentLifecycleState("agt_coder", lifecycleById)).toBe("running");
   });
 
-  test("full reset clears the current agent thread but keeps the agent definition", () => {
+  test("reset memory keeps the agent definition and marks the lifecycle running", () => {
     const result = applyAgentRestartOption({
       workspace,
       lifecycleById: { agt_coder: "stopped" },
       agentId: "agt_coder",
       channelId: "dir_admin_coder",
-      option: "full_reset"
+      option: "reset_memory"
     });
 
     expect(result.workspace.agents).toHaveLength(1);
-    expect(result.workspace.messages).toHaveLength(0);
-    expect(result.workspace.issues).toHaveLength(0);
+    expect(result.workspace.messages).toHaveLength(workspace.messages.length);
+    expect(result.workspace.issues).toHaveLength(workspace.issues.length);
     expect(result.lifecycleById.agt_coder).toBe("running");
   });
 

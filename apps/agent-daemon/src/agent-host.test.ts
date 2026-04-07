@@ -760,6 +760,172 @@ describe("agent os host", () => {
     expect(closedSessionIds.sort()).toEqual(["ses_1", "ses_2"]);
   });
 
+  test("reset session clears persisted conversation summaries before the next prompt", async () => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "workpilot-agent-host-"));
+    cleanupPaths.push(workspaceRoot);
+
+    const promptCalls: string[] = [];
+    let sessionCount = 0;
+    let responseCount = 0;
+    const host = createAgentOsHost({
+      runtimeId: "rtm_demo",
+      runtimeName: "datacenter",
+      workspaceRoot,
+      createSandboxAgent: async () => ({
+        async installAgent() {},
+        async createSession() {
+          sessionCount += 1;
+          const sessionId = `ses_${sessionCount}`;
+          const listeners = new Set<(event: unknown) => void>();
+
+          return {
+            id: sessionId,
+            onEvent(listener) {
+              listeners.add(listener);
+              return () => listeners.delete(listener);
+            },
+            onPermissionRequest() {
+              return () => {};
+            },
+            async respondPermission() {},
+            async prompt(prompt) {
+              const text = (prompt as Array<{ type: string; text: string }>)[0]?.text ?? "";
+              promptCalls.push(text);
+              responseCount += 1;
+
+              for (const listener of listeners) {
+                listener({
+                  payload: {
+                    method: "session/update",
+                    params: {
+                      update: {
+                        sessionUpdate: "agent_message_chunk",
+                        content: {
+                          type: "text",
+                          text: responseCount === 1 ? "First reply" : "Second reply"
+                        }
+                      }
+                    }
+                  }
+                });
+              }
+
+              return {
+                stopReason: "end_turn"
+              };
+            },
+            async close() {}
+          };
+        },
+        async dispose() {}
+      })
+    });
+
+    const agent: AgentIdentity = {
+      id: "agt_reset_session",
+      runtimeId: "rtm_demo",
+      channelId: "dir_admin_reset_session",
+      name: "Resettable",
+      description: "Starts fresh conversations on demand.",
+      implementation: "claude",
+      model: "claude-sonnet-4.5",
+      reasoningEffort: "medium",
+      status: "running"
+    };
+
+    await host.syncAgents([agent]);
+    await host.run(agent, "What is the first question of this conversation?", {
+      conversationKey: "channel:dir_admin_reset_session"
+    });
+
+    const summaryPath = join(
+      workspaceRoot,
+      "agents",
+      agent.id,
+      "sessions",
+      "channel:dir_admin_reset_session",
+      "summary.md"
+    );
+    expect(await readFile(summaryPath, "utf8")).toContain("What is the first question of this conversation?");
+
+    await host.restartAgent(agent.id, "reset_session");
+
+    await host.run(agent, "What's the first question of this conversation?", {
+      conversationKey: "channel:dir_admin_reset_session"
+    });
+
+    expect(promptCalls[1]).not.toContain("## Current Conversation Summary");
+    expect(promptCalls[1]).not.toContain("What is the first question of this conversation?");
+
+    const memoryMd = await readFile(join(workspaceRoot, "agents", agent.id, "memory.md"), "utf8");
+    expect(memoryMd).not.toContain("### channel:dir_admin_reset_session");
+  });
+
+  test("reset memory clears memory artifacts and recreates a fresh workspace scaffold", async () => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "workpilot-agent-host-"));
+    cleanupPaths.push(workspaceRoot);
+
+    const host = createAgentOsHost({
+      runtimeId: "rtm_demo",
+      runtimeName: "datacenter",
+      workspaceRoot,
+      createSandboxAgent: async () => ({
+        async installAgent() {},
+        async createSession() {
+          return {
+            id: "ses_memory",
+            onEvent() {
+              return () => {};
+            },
+            onPermissionRequest() {
+              return () => {};
+            },
+            async respondPermission() {},
+            async prompt() {
+              return {
+                stopReason: "end_turn"
+              };
+            }
+          };
+        },
+        async dispose() {}
+      })
+    });
+
+    const agent: AgentIdentity = {
+      id: "agt_reset_memory",
+      runtimeId: "rtm_demo",
+      channelId: "dir_admin_reset_memory",
+      name: "Resettable",
+      description: "Tracks state that can be wiped.",
+      implementation: "claude",
+      model: "claude-sonnet-4.5",
+      reasoningEffort: "medium",
+      status: "running"
+    };
+
+    await host.syncAgents([agent]);
+    await host.run(agent, "Remember this work.", { conversationKey: "channel:dir_admin_reset_memory" });
+
+    await writeFile(join(workspaceRoot, "agents", agent.id, "notes.txt"), "stale local file\n", "utf8");
+
+    await host.restartAgent(agent.id, "reset_memory");
+
+    const agentRoot = join(workspaceRoot, "agents", agent.id);
+    const memoryMd = await readFile(join(agentRoot, "memory.md"), "utf8");
+    const worklogMd = await readFile(join(agentRoot, "worklog.md"), "utf8");
+    const sessionJson = await readFile(join(agentRoot, "session.json"), "utf8");
+    const files = await host.listWorkspaceFiles(agent.id);
+
+    expect(memoryMd).toContain("# Agent Memory");
+    expect(memoryMd).not.toContain("Remember this work.");
+    expect(worklogMd).toContain("Initialized local workspace for Resettable.");
+    expect(worklogMd).not.toContain("Remember this work.");
+    expect(sessionJson).toContain('"mode": "reset_memory"');
+    expect(files.some((file) => file.path === "notes.txt")).toBe(false);
+    expect(files.some((file) => file.path === "sessions/channel:dir_admin_reset_memory/summary.md")).toBe(false);
+  });
+
   test("fails fast when sandbox-agent session creation hangs", async () => {
     const workspaceRoot = await mkdtemp(join(tmpdir(), "workpilot-agent-host-"));
     cleanupPaths.push(workspaceRoot);

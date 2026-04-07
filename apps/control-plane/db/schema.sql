@@ -77,7 +77,7 @@ create table if not exists agent_control_actions (
   runtime_id text not null references runtime_daemons(id) on delete cascade,
   agent_id text not null,
   action text not null check (action in ('start', 'stop', 'restart', 'delete')),
-  restart_mode text check (restart_mode in ('restart', 'reset_session', 'full_reset')),
+  restart_mode text check (restart_mode in ('restart', 'reset_session', 'reset_memory', 'full_reset')),
   requested_at timestamptz not null default now(),
   acknowledged_at timestamptz
 );
