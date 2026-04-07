@@ -13,9 +13,13 @@ import { Badge, Button, Card, CardContent, CardDescription, CardHeader, CardTitl
 import {
   Bot,
   ArrowLeft,
+  Check,
   ChevronDown,
   ChevronRight,
+  Circle,
+  CircleDot,
   Copy,
+  Eye,
   FileText,
   Files,
   Folder,
@@ -23,6 +27,7 @@ import {
   ClipboardList,
   KanbanSquare,
   CalendarDays,
+  Loader,
   LogOut,
   MessageSquareText,
   Monitor,
@@ -38,8 +43,7 @@ import {
   Layers,
   AtSign,
   UsersRound,
-  UserRound,
-  GripVertical
+  UserRound
 } from "lucide-react";
 import { startTransition, useEffect, useMemo, useRef, useState, type ClipboardEvent, type FormEvent, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { createWorkPilotApiClient } from "./lib/api";
@@ -116,11 +120,15 @@ import {
   getRuntimeStatusTone,
   getSidebarItemClass,
   getStatusDotClass,
+  getPriorityColor,
+  getStatusLaneConfig,
+  getStatusLaneConfigs,
   getStatusPillClass,
   getTimelineConnectorClass,
   getTimelineDotClass,
   getTimelineStepCardClass,
   type ActorTone,
+  type StatusLaneConfig,
   type StatusTone
 } from "./lib/theme";
 import {
@@ -189,7 +197,7 @@ const runtimeCommandModeOptions: Array<{ id: RuntimeCommandMode; label: string }
 
 type RuntimeCommandMode = "npx" | "bunx" | "source";
 type AgentLifecycleState = "running" | "stopped";
-type AgentRestartOption = "restart" | "reset_session" | "full_reset";
+type AgentRestartOption = "reset_session" | "reset_memory";
 type IssueCreateDraft = ReturnType<typeof initialIssueCreateDraft>;
 
 interface RuntimeConnectPanelState {
@@ -1784,11 +1792,9 @@ export function App() {
     setAgentActionDialog(null);
 
     const notice =
-      option === "restart"
-        ? `${agent.name} restart requested.`
-        : option === "reset_session"
-          ? `${agent.name} session reset requested. Memory will be kept.`
-          : `${agent.name} full reset requested.`;
+      option === "reset_session"
+        ? `${agent.name} session reset requested. Memory will be kept.`
+        : `${agent.name} memory reset requested. A fresh session will be started.`;
     setAgentActionNotice(notice);
   }
 
@@ -3337,7 +3343,7 @@ export function App() {
                             {activeAgentLifecycleState === "running" ? "Stop" : "Start"}
                           </Button>
                           <Button onClick={() => handleOpenRestartDialog()} size="sm" type="button" className="bg-white/76 ring-1 ring-neutral-200/80 hover:bg-white hover:ring-neutral-300" variant="ghost">
-                            Restart
+                            Reset
                           </Button>
                           <Button
                             className="bg-rose-50/70 text-rose-700 ring-1 ring-rose-200/80 hover:bg-rose-50 hover:text-rose-800 hover:ring-rose-300"
@@ -4214,17 +4220,21 @@ export function App() {
                         </div>
                         <div className="flex flex-wrap items-center gap-2">
                           <button
-                            aria-label="Stop agent"
+                            aria-label={selectedAgentWorkspace.status === "running" ? "Stop agent" : "Start agent"}
                             className="flex h-10 items-center justify-center gap-2 rounded-[0.95rem] border border-[color:color-mix(in_srgb,var(--accent)_18%,white)] bg-[color:color-mix(in_srgb,var(--surface)_88%,white)] px-3 text-sm font-medium text-[var(--text-primary)] shadow-[0_8px_18px_rgba(15,23,42,0.05)] transition hover:border-[color:color-mix(in_srgb,var(--accent)_28%,white)] hover:bg-[color:color-mix(in_srgb,var(--accent-soft)_62%,white)] disabled:cursor-not-allowed disabled:border-neutral-200 disabled:bg-neutral-100 disabled:text-neutral-300"
-                            disabled={selectedAgentWorkspace.status === "stopped"}
-                            onClick={() => handleOpenLifecycleDialog("stopped", selectedAgentWorkspace)}
+                            onClick={() =>
+                              handleOpenLifecycleDialog(
+                                selectedAgentWorkspace.status === "running" ? "stopped" : "running",
+                                selectedAgentWorkspace
+                              )
+                            }
                             type="button"
                           >
                             <Square className="size-4" />
-                            <span>Stop</span>
+                            <span>{selectedAgentWorkspace.status === "running" ? "Stop" : "Start"}</span>
                           </button>
                           <button
-                            aria-label="Reset agent"
+                            aria-label="Reset agent state"
                             className="flex h-10 items-center justify-center gap-2 rounded-[0.95rem] border border-[color:color-mix(in_srgb,var(--accent)_18%,white)] bg-[color:color-mix(in_srgb,var(--surface)_88%,white)] px-3 text-sm font-medium text-[var(--text-primary)] shadow-[0_8px_18px_rgba(15,23,42,0.05)] transition hover:border-[color:color-mix(in_srgb,var(--accent)_28%,white)] hover:bg-[color:color-mix(in_srgb,var(--accent-soft)_62%,white)]"
                             onClick={() => handleOpenRestartDialog(selectedAgentWorkspace)}
                             type="button"
@@ -4458,7 +4468,7 @@ export function App() {
                           <div className="flex min-h-0 flex-col lg:border-r lg:border-neutral-200/80">
                             <div className="border-b border-neutral-200/80 px-4 py-3 lg:border-b-0">
                               <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-500">Agent Workspace</p>
-                              <p className="mt-1 text-xs text-neutral-400">Persistent files synced from the daemon host.</p>
+                              <p className="mt-1 font-mono text-[11px] text-neutral-400">~/.workpilot/agents/{selectedAgentWorkspace.id}/</p>
                             </div>
                             <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
                               {isAgentWorkspaceFilesLoading ? (
@@ -5358,12 +5368,12 @@ export function App() {
               <div>
                 <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-500">Agent Control</p>
                 <h2 className="mt-2 text-[32px] font-semibold tracking-[-0.05em] text-neutral-950">
-                  {agentActionDialog.kind === "confirm" ? agentActionDialog.title : `Restart ${dialogAgent?.name ?? "Agent"}`}
+                  {agentActionDialog.kind === "confirm" ? agentActionDialog.title : `Reset ${dialogAgent?.name ?? "Agent"}`}
                 </h2>
                 <p className="mt-2 max-w-2xl text-sm leading-6 text-neutral-500">
                   {agentActionDialog.kind === "confirm"
                     ? agentActionDialog.description
-                    : "Choose which restart command to queue through the control-plane for this agent."}
+                    : "Choose how much agent state to clear. Stop and delete are handled as separate actions."}
                 </p>
               </div>
               <button
@@ -5393,27 +5403,19 @@ export function App() {
               <div className="mt-6 grid gap-3">
                 <button
                   className="rounded-[1.2rem] border border-neutral-200 bg-white px-4 py-4 text-left transition hover:border-neutral-300 hover:bg-neutral-50"
-                  onClick={() => void handleRestartAgent("restart", dialogAgent ?? undefined)}
-                  type="button"
-                >
-                  <p className="text-sm font-semibold text-neutral-950">Restart</p>
-                  <p className="mt-1 text-sm leading-6 text-neutral-500">Keep the current session and memory, then bring the agent back up.</p>
-                </button>
-                <button
-                  className="rounded-[1.2rem] border border-neutral-200 bg-white px-4 py-4 text-left transition hover:border-neutral-300 hover:bg-neutral-50"
                   onClick={() => void handleRestartAgent("reset_session", dialogAgent ?? undefined)}
                   type="button"
                 >
-                  <p className="text-sm font-semibold text-neutral-950">Reset Session, Keep Memory</p>
-                  <p className="mt-1 text-sm leading-6 text-neutral-500">Drop the active session state, preserve memory, then restart.</p>
+                  <p className="text-sm font-semibold text-neutral-950">Reset Session</p>
+                  <p className="mt-1 text-sm leading-6 text-neutral-500">Close the current session and start a fresh one, while keeping memory and worklog files.</p>
                 </button>
                 <button
-                  className="rounded-[1.2rem] border border-rose-200 bg-rose-50 px-4 py-4 text-left transition hover:border-rose-300 hover:bg-rose-100"
-                  onClick={() => void handleRestartAgent("full_reset", dialogAgent ?? undefined)}
+                  className="rounded-[1.2rem] border border-amber-200 bg-amber-50 px-4 py-4 text-left transition hover:border-amber-300 hover:bg-amber-100"
+                  onClick={() => void handleRestartAgent("reset_memory", dialogAgent ?? undefined)}
                   type="button"
                 >
-                  <p className="text-sm font-semibold text-rose-700">Full Reset</p>
-                  <p className="mt-1 text-sm leading-6 text-rose-600">Ask the daemon to wipe local agent session state and restart from a clean runtime workspace.</p>
+                  <p className="text-sm font-semibold text-amber-700">Reset Memory</p>
+                  <p className="mt-1 text-sm leading-6 text-amber-700">Recreate the agent workspace from a clean scaffold, removing old memory, session artifacts, and stale local files.</p>
                 </button>
 
                 <div className="mt-2 flex items-center justify-end">
@@ -6663,6 +6665,27 @@ function EmptyState({ children }: { children: ReactNode }) {
   return (
     <div className="rounded-[1.2rem] border border-dashed border-neutral-300 bg-[var(--panel-muted)] px-6 py-16 text-center text-sm text-neutral-500">
       {children}
+    </div>
+  );
+}
+
+function StatusLaneIcon({ config }: { config: StatusLaneConfig }) {
+  const iconMap: Record<string, React.ComponentType<{ className?: string }>> = {
+    CircleDot,
+    Circle,
+    Loader,
+    Eye,
+    Check,
+  };
+  const IconComponent = iconMap[config.icon] ?? Circle;
+  return (
+    <div
+      className="flex size-7 shrink-0 items-center justify-center rounded-lg"
+      style={{
+        background: `linear-gradient(135deg, ${config.color}, ${config.colorLight})`,
+      }}
+    >
+      <IconComponent className="size-3.5 text-white" />
     </div>
   );
 }
