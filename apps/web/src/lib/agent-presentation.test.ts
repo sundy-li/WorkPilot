@@ -11,7 +11,7 @@ describe("agent presentation", () => {
       getPublicImplementationSummary({
         label: "Codex CLI",
         notes: "Best fit for repository-centric coding work.",
-        packageName: "@rivet-dev/agent-os-codex-agent"
+        packageName: "codex"
       })
     ).toEqual({
       title: "Codex CLI",

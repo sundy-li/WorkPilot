@@ -1,11 +1,25 @@
-import type { AuthSession, ChannelSummary, IssueDTO, MessageDTO, WorkspaceBootstrapPayload } from "@workpilot/shared";
+import type {
+  AgentWorkspaceFileContentDTO,
+  AgentWorkspaceFileSummaryDTO,
+  AuthSession,
+  ChannelParticipantDTO,
+  ChannelSummary,
+  IssueActivityDTO,
+  IssueDTO,
+  MessageDTO,
+  WorkspaceBootstrapPayload
+} from "@workpilot/shared";
 import { Badge, Button, Card, CardContent, CardDescription, CardHeader, CardTitle, Input } from "@workpilot/ui";
 import {
   Bot,
+  ArrowLeft,
   ChevronDown,
   ChevronRight,
   Copy,
   FileText,
+  Files,
+  Folder,
+  FolderOpen,
   ClipboardList,
   KanbanSquare,
   CalendarDays,
@@ -21,7 +35,9 @@ import {
   Sparkles,
   Trash2,
   X,
-  GitBranch,
+  Layers,
+  AtSign,
+  UsersRound,
   UserRound,
   GripVertical
 } from "lucide-react";
@@ -60,17 +76,20 @@ import { closeDetailPanel, openDetailPanel, shouldShowExplorer, type DetailPanel
 import { clearSelection, createSelectionState, toggleMessageSelection, type MessageSelectionState } from "./lib/message-selection";
 import { getMessageAttachments } from "./lib/message-attachments";
 import { resolveMessageSenderDisplayName } from "./lib/message-presenter";
+import { MessageContent } from "./lib/message-content";
 import {
   buildRuntimeInstallCommand,
   createRuntimeConnectPanel,
   findNewlyConnectedRuntime,
   getRuntimeConnectStatusText
 } from "./lib/runtime-connect";
+import { getRuntimePresenceDetail } from "./lib/runtime-presence";
 import { createTimestampLabels } from "./lib/timestamp";
 import {
   createInitialShellState,
   getChannelDisplayName,
   getDefaultChannelId,
+  reconcileInvalidActiveTarget,
   selectConversationTarget,
   selectPrimaryView,
   selectWorkspace,
@@ -150,24 +169,11 @@ const initialDetailPanelState: DetailPanelState = {
 };
 
 type CenterView = "chat" | "issues";
-
-const initialWorkspaceOptions = [
-  {
-    id: "org_demo",
-    label: "abc",
-    description: "Core workspace"
-  },
-  {
-    id: "org_ops_lab",
-    label: "ops-lab",
-    description: "Staging workspace"
-  },
-  {
-    id: "org_release",
-    label: "release",
-    description: "Release workspace"
-  }
-];
+type WorkspaceOption = {
+  id: string;
+  label: string;
+  description: string;
+};
 
 const initialMessageSelectionState: MessageSelectionState = {
   isMultiSelectMode: false,
@@ -224,6 +230,7 @@ export function App() {
   const [session, setSession] = useState<AuthSession | null>(null);
   const [isSessionReady, setIsSessionReady] = useState(false);
   const [workspace, setWorkspace] = useState<WorkspaceBootstrapPayload | null>(null);
+  const [isWorkspacesReady, setIsWorkspacesReady] = useState(false);
   const [centerView, setCenterView] = useState<CenterView>("chat");
   const [composerValue, setComposerValue] = useState("");
   const [composerAttachments, setComposerAttachments] = useState<ComposerAttachmentDraft[]>([]);
@@ -247,10 +254,11 @@ export function App() {
   const [agentActionDialog, setAgentActionDialog] = useState<AgentActionDialogState | null>(null);
   const [runtimeDeleteDialog, setRuntimeDeleteDialog] = useState<RuntimeDeleteDialogState | null>(null);
   const [agentDraft, setAgentDraft] = useState<AgentDraft>(initialAgentDraft);
-  const [workspaceOptions, setWorkspaceOptions] = useState(initialWorkspaceOptions);
+  const [workspaceOptions, setWorkspaceOptions] = useState<WorkspaceOption[]>([]);
   const [isWorkspaceSwitcherOpen, setIsWorkspaceSwitcherOpen] = useState(false);
   const [isWorkspaceCreateOpen, setIsWorkspaceCreateOpen] = useState(false);
   const [workspaceDraftName, setWorkspaceDraftName] = useState("");
+  const [workspaceDraftDescription, setWorkspaceDraftDescription] = useState("");
   const [agentDirectChannelIds, setAgentDirectChannelIds] = useState<Record<string, string>>({});
   const [issueCreateDraft, setIssueCreateDraft] = useState<IssueCreateDraft>(() => initialIssueCreateDraft());
   const [isIssueCreateModalOpen, setIsIssueCreateModalOpen] = useState(false);
@@ -265,6 +273,13 @@ export function App() {
   });
   const [isStatusWorkspaceMenuOpen, setIsStatusWorkspaceMenuOpen] = useState(false);
   const [detailPanel, setDetailPanel] = useState<DetailPanelState>(initialDetailPanelState);
+  const [expandedAgentLogIds, setExpandedAgentLogIds] = useState<Record<string, boolean>>({});
+  const [agentWorkspaceFiles, setAgentWorkspaceFiles] = useState<AgentWorkspaceFileSummaryDTO[]>([]);
+  const [agentWorkspaceFileContents, setAgentWorkspaceFileContents] = useState<Record<string, AgentWorkspaceFileContentDTO>>({});
+  const [selectedAgentWorkspaceFilePath, setSelectedAgentWorkspaceFilePath] = useState<string | null>(null);
+  const [collapsedAgentWorkspaceFolders, setCollapsedAgentWorkspaceFolders] = useState<Record<string, boolean>>({});
+  const [isAgentWorkspaceFilesLoading, setIsAgentWorkspaceFilesLoading] = useState(false);
+  const [agentWorkspaceFilesError, setAgentWorkspaceFilesError] = useState<string | null>(null);
   const [isExplorerOpen, setIsExplorerOpen] = useState(true);
   const [isAccountMenuOpen, setIsAccountMenuOpen] = useState(false);
   const [isThemeModeMenuOpen, setIsThemeModeMenuOpen] = useState(false);
@@ -275,23 +290,64 @@ export function App() {
   const [isChannelsCollapsed, setIsChannelsCollapsed] = useState(false);
   const [isAgentsCollapsed, setIsAgentsCollapsed] = useState(false);
   const [expandedRuntimeIds, setExpandedRuntimeIds] = useState<Record<string, boolean>>({});
+  const [settingsTab, setSettingsTab] = useState<"account" | "appearance" | "permissions">("account");
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteRole, setInviteRole] = useState<"member" | "admin">("member");
+  const [workspaceInvitations, setWorkspaceInvitations] = useState<Array<{
+    id: string;
+    email: string;
+    role: "owner" | "admin" | "member";
+    invitedBy: string;
+    token: string;
+    expiresAt: string;
+    acceptedAt: string | null;
+    createdAt: string;
+  }>>([]);
   const [channelDraftName, setChannelDraftName] = useState("");
-  const [shellState, setShellState] = useState<ShellState>(() => createInitialShellState([], "org_demo"));
+  const [channelDraftDescription, setChannelDraftDescription] = useState("");
+  const [channelDraftUserIds, setChannelDraftUserIds] = useState<string[]>([]);
+  const [channelDraftAgentIds, setChannelDraftAgentIds] = useState<string[]>([]);
+  const [channelParticipants, setChannelParticipants] = useState<ChannelParticipantDTO[]>([]);
+  const [isChannelSettingsOpen, setIsChannelSettingsOpen] = useState(false);
+  const [isChannelMembersOpen, setIsChannelMembersOpen] = useState(false);
+  const [channelSettingsDraft, setChannelSettingsDraft] = useState({ name: "", description: "" });
+  const [channelSettingsNotice, setChannelSettingsNotice] = useState<string | null>(null);
+  const [mentionState, setMentionState] = useState<{
+    query: string;
+    start: number;
+    end: number;
+    selectedIndex: number;
+  } | null>(null);
+  const [organizationMembers, setOrganizationMembers] = useState<Array<{
+    userId: string;
+    email: string;
+    role: "owner" | "admin" | "member";
+  }>>([]);
+  const [shellState, setShellState] = useState<ShellState>(() => createInitialShellState([], ""));
   const [agentWorkspace, setAgentWorkspace] = useState<AgentWorkspaceBrowserState>(() => createInitialAgentWorkspaceBrowserState(null));
   const [runtimeWorkspace, setRuntimeWorkspace] = useState<RuntimeWorkspaceBrowserState>(() =>
     createInitialRuntimeWorkspaceBrowserState(null)
   );
   const [selectedRuntimeIdForPage, setSelectedRuntimeIdForPage] = useState<string | null>(null);
+  const [selectedIssueIdForPage, setSelectedIssueIdForPage] = useState<string | null>(null);
+  const [selectedUserIdForPage, setSelectedUserIdForPage] = useState<string | null>(null);
+  const [issueEditorDraft, setIssueEditorDraft] = useState(() => initialIssueCreateDraft());
+  const [issueEditorBrief, setIssueEditorBrief] = useState("");
+  const [issueCommentDraft, setIssueCommentDraft] = useState("");
+  const [issueEditorNotice, setIssueEditorNotice] = useState<string | null>(null);
   const [messageSelection, setMessageSelection] = useState<MessageSelectionState>(initialMessageSelectionState);
   const [bulkIssueDescription, setBulkIssueDescription] = useState("");
   const [messageContextMenu, setMessageContextMenu] = useState<{ messageId: string; x: number; y: number } | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const avatarInputRef = useRef<HTMLInputElement | null>(null);
   const messageScrollerRef = useRef<HTMLDivElement | null>(null);
   const accountMenuRef = useRef<HTMLDivElement | null>(null);
+  const issueAutosaveRequestIdRef = useRef(0);
   const workspaceSwitcherRef = useRef<HTMLDivElement | null>(null);
   const statusWorkspaceMenuRef = useRef<HTMLDivElement | null>(null);
   const previousMessageCountRef = useRef(0);
+  const previousNonSettingsPathRef = useRef<string>("/");
 
   useEffect(() => {
     applyThemeModeToDocument(themeMode, document);
@@ -302,12 +358,46 @@ export function App() {
   const navigate = useNavigate();
 
   useEffect(() => {
+    const routerState = parseRouterState(pathname);
+
+    if (!routerState.isLoginPage && !routerState.isRoot && routerState.primaryView !== "settings") {
+      previousNonSettingsPathRef.current = pathname;
+    }
+  }, [pathname]);
+
+  useEffect(() => {
+    if (shellState.primaryView !== "settings") {
+      return;
+    }
+
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape") {
+        return;
+      }
+
+      const target = event.target;
+      if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) {
+        return;
+      }
+
+      event.preventDefault();
+      handleCloseSettingsPage();
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [shellState.primaryView]);
+
+  useEffect(() => {
     if (!session && pathname !== "/login") {
       return;
     }
 
     if (session && pathname === "/login") {
-      navigate("/workspace/org_demo");
+      navigate(workspaceOptions[0] ? `/workspace/${workspaceOptions[0].id}` : "/");
       return;
     }
 
@@ -316,7 +406,7 @@ export function App() {
     const routerState = parseRouterState(pathname);
 
     if (routerState.isLoginPage && session) {
-      navigate(`/workspace/${routerState.workspaceId || "org_demo"}`);
+      navigate(workspaceOptions[0] ? `/workspace/${workspaceOptions[0].id}` : "/");
       return;
     }
 
@@ -332,12 +422,18 @@ export function App() {
       detailOpen: false,
     }));
 
+    if (routerState.activeUserId) {
+      setSelectedUserIdForPage(routerState.activeUserId);
+    }
+
+    setSelectedIssueIdForPage(routerState.activeIssueId);
+
     if (routerState.primaryView === "issues") {
       setCenterView("issues");
     } else if (routerState.primaryView === "chat") {
       setCenterView("chat");
     }
-  }, [pathname, session, workspace]);
+  }, [pathname, session, workspace, workspaceOptions]);
 
   useEffect(() => {
     let cancelled = false;
@@ -369,6 +465,67 @@ export function App() {
 
   useEffect(() => {
     if (!session) {
+      setWorkspaceOptions([]);
+      setIsWorkspacesReady(false);
+      return;
+    }
+
+    let cancelled = false;
+    const userId = session.userId;
+
+    async function loadWorkspaces() {
+      const response = await api.getWorkspaces(userId);
+      if (cancelled) {
+        return;
+      }
+
+      const options = response.workspaces.map((workspace) => ({
+        id: workspace.id,
+        label: workspace.name,
+        description: `/${workspace.slug}`
+      }));
+
+      setWorkspaceOptions(options);
+      setIsWorkspacesReady(true);
+
+      const fallbackWorkspaceId = options[0]?.id ?? "";
+      const nextWorkspaceId =
+        options.some((option) => option.id === shellState.workspaceId) ? shellState.workspaceId : fallbackWorkspaceId;
+
+      setShellState((current) => ({
+        ...current,
+        workspaceId: nextWorkspaceId
+      }));
+
+      if (!nextWorkspaceId) {
+        setWorkspace(null);
+        navigate("/");
+        return;
+      }
+
+      const routerState = parseRouterState(pathname);
+      if (
+        pathname === "/" ||
+        !options.some((option) => option.id === routerState.workspaceId)
+      ) {
+        navigate(buildPath("/workspace/:workspaceId", { workspaceId: nextWorkspaceId }));
+      }
+    }
+
+    void loadWorkspaces().catch((loadError) => {
+      if (!cancelled) {
+        setError(loadError instanceof Error ? loadError.message : "Failed to load workspaces.");
+        setIsWorkspacesReady(true);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [navigate, pathname, session, shellState.workspaceId]);
+
+  useEffect(() => {
+    if (!session || !shellState.workspaceId) {
       return;
     }
 
@@ -398,17 +555,58 @@ export function App() {
   }, [session, shellState.workspaceId]);
 
   useEffect(() => {
+    if (!workspace?.organization) {
+      return;
+    }
+
+    let cancelled = false;
+    const organizationId = workspace.organization.id;
+
+    async function loadOrganizationMembers() {
+      const response = await api.getOrganizationMembers(organizationId);
+      if (!cancelled) {
+        setOrganizationMembers(response.members);
+      }
+    }
+
+    void loadOrganizationMembers().catch(() => {});
+
+    return () => {
+      cancelled = true;
+    };
+  }, [workspace?.organization]);
+
+  useEffect(() => {
+    if (!workspace?.organization) {
+      return;
+    }
+
+    let cancelled = false;
+    const organizationId = workspace.organization.id;
+
+    async function loadInvitations() {
+      const response = await api.getWorkspaceInvitations(organizationId);
+      if (!cancelled) {
+        setWorkspaceInvitations(response.invitations);
+      }
+    }
+
+    void loadInvitations().catch(() => {});
+
+    return () => {
+      cancelled = true;
+    };
+  }, [workspace?.organization]);
+
+  useEffect(() => {
     if (!workspace) {
       return;
     }
 
-    const hasTarget =
-      shellState.activeTarget.kind === "channel"
-        ? workspace.channels.some((channel) => channel.id === shellState.activeTarget.id)
-        : workspace.agents.some((agent) => agent.id === shellState.activeTarget.id);
+    const nextShellState = reconcileInvalidActiveTarget(shellState, workspace.channels, workspace.agents);
 
-    if (!hasTarget) {
-      setShellState(createInitialShellState(workspace.channels, shellState.workspaceId));
+    if (nextShellState !== shellState) {
+      setShellState(nextShellState);
     }
 
     if (!selectedRuntimeIdForPage) {
@@ -464,12 +662,11 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (!runtimeConnectPanel?.isOpen || !session || runtimeConnectPanel.connectedRuntimeId) {
+    if (!session || !shellState.workspaceId) {
       return;
     }
 
-    const organizationId = session.organizationId;
-    const baselineRuntimeIds = runtimeConnectPanel.baselineRuntimeIds;
+    const organizationId = shellState.workspaceId;
     let cancelled = false;
 
     async function pollRuntimes() {
@@ -488,7 +685,11 @@ export function App() {
           : current
       );
 
-      const connectedRuntime = findNewlyConnectedRuntime(baselineRuntimeIds, response.runtimes);
+      if (!runtimeConnectPanel?.isOpen || runtimeConnectPanel.connectedRuntimeId) {
+        return;
+      }
+
+      const connectedRuntime = findNewlyConnectedRuntime(runtimeConnectPanel.baselineRuntimeIds, response.runtimes);
 
       if (connectedRuntime) {
         setRuntimeConnectPanel((current) =>
@@ -506,13 +707,13 @@ export function App() {
     void pollRuntimes().catch(() => {});
     const intervalId = window.setInterval(() => {
       void pollRuntimes().catch(() => {});
-    }, 2000);
+    }, 5000);
 
     return () => {
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, [runtimeConnectPanel?.baselineRuntimeIds, runtimeConnectPanel?.connectedRuntimeId, runtimeConnectPanel?.isOpen, session]);
+  }, [runtimeConnectPanel?.baselineRuntimeIds, runtimeConnectPanel?.connectedRuntimeId, runtimeConnectPanel?.isOpen, session, shellState.workspaceId]);
 
   useEffect(() => {
     if (!runtimeConnectPanel?.isOpen || !runtimeConnectPanel.connectedRuntimeId) {
@@ -542,7 +743,11 @@ export function App() {
     };
   }, [runtimeConnectPanel?.connectedRuntimeId, runtimeConnectPanel?.isOpen]);
 
-  const selectedWorkspaceOption = workspaceOptions.find((option) => option.id === shellState.workspaceId) ?? workspaceOptions[0];
+  const selectedWorkspaceOption = workspaceOptions.find((option) => option.id === shellState.workspaceId) ?? workspaceOptions[0] ?? {
+    id: "",
+    label: "Workspace",
+    description: "/workspace"
+  };
   const groupChannels = workspace?.channels.filter((channel) => channel.type === "group") ?? [];
   const activeAgent = shellState.activeTarget.kind === "agent" ? workspace?.agents.find((agent) => agent.id === shellState.activeTarget.id) ?? null : null;
   const resolvedActiveChannelId = resolveConversationChannelId(shellState.activeTarget, workspace);
@@ -551,9 +756,15 @@ export function App() {
       ? agentDirectChannelIds[shellState.activeTarget.id] ?? resolvedActiveChannelId
       : resolvedActiveChannelId;
   const activeChannel = workspace?.channels.find((channel) => channel.id === activeChannelId) ?? null;
+  const activeChannelParticipantCount = channelParticipants.length;
   const workspaceIssues = workspace?.issues ?? [];
-  const activeMessages = workspace?.messages.filter((message) => message.channelId === activeChannelId) ?? [];
+  const activeMessages = (workspace?.messages.filter((message) => message.channelId === activeChannelId) ?? [])
+    .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
   const activeIssues = workspaceIssues.filter((issue) => issue.sourceChannelId === activeChannelId);
+  const activeConversationDescription =
+    shellState.activeTarget.kind === "channel"
+      ? activeChannel?.description?.trim() ?? ""
+      : activeAgent?.description?.trim() ?? "";
   const activeAgentLifecycleState = activeAgent?.status ?? "running";
   const activeAgentActivity =
     activeAgent ? workspace?.agentActivities.find((activity) => activity.agentId === activeAgent.id) ?? null : null;
@@ -569,6 +780,7 @@ export function App() {
     workspace?.agents.find((agent) => agent.id === agentWorkspace.agentId) ?? workspace?.agents[0] ?? null;
   const selectedRuntimeWorkspace =
     workspace?.runtimes.find((runtime) => runtime.id === runtimeWorkspace.runtimeId) ?? workspace?.runtimes[0] ?? null;
+  const selectedRuntimePresenceDetail = selectedRuntimeWorkspace ? getRuntimePresenceDetail(selectedRuntimeWorkspace) : null;
   const selectedAgentWorkspaceChannelId = selectedAgentWorkspace
     ? agentDirectChannelIds[selectedAgentWorkspace.id] ??
       resolveConversationChannelId({ kind: "agent", id: selectedAgentWorkspace.id }, workspace)
@@ -587,12 +799,30 @@ export function App() {
     selectedAgentWorkspace
       ? workspace?.agentActivities.find((activity) => activity.agentId === selectedAgentWorkspace.id) ?? null
       : null;
+  const selectedAgentWorkspaceActivityBadge = selectedAgentWorkspace
+    ? getAgentActivityBadge({
+        implementation: selectedAgentWorkspace.implementation,
+        activity: selectedAgentWorkspaceActivity
+      })
+    : null;
+  const selectedAgentWorkspaceLogs = selectedAgentWorkspace
+    ? workspace?.agentRunLogs.filter((log) => log.agentId === selectedAgentWorkspace.id) ?? []
+    : [];
+  const selectedAgentWorkspaceFile = selectedAgentWorkspace && selectedAgentWorkspaceFilePath
+    ? agentWorkspaceFileContents[`${selectedAgentWorkspace.id}:${selectedAgentWorkspaceFilePath}`] ?? null
+    : null;
+  const agentWorkspaceTree = useMemo(
+    () => buildAgentWorkspaceTree(agentWorkspaceFiles, collapsedAgentWorkspaceFolders),
+    [agentWorkspaceFiles, collapsedAgentWorkspaceFolders]
+  );
+  const isAgentWorkspaceConversationMode =
+    shellState.primaryView === "agents" && (agentWorkspace.mode === "chat" || agentWorkspace.mode === "logs");
   const isSelectedAgentWorkspaceStopped = selectedAgentWorkspaceLifecycleState === "stopped";
   const agentWorkspaceLayoutClassNames = getAgentWorkspaceLayoutClasses(agentWorkspace.mode);
   const detailContextMessages =
-    shellState.primaryView === "agents" && agentWorkspace.mode === "chat" ? selectedAgentWorkspaceMessages : activeMessages;
+    isAgentWorkspaceConversationMode ? selectedAgentWorkspaceMessages : activeMessages;
   const currentChatChannelId =
-    shellState.primaryView === "agents" && agentWorkspace.mode === "chat"
+    isAgentWorkspaceConversationMode
       ? selectedAgentWorkspaceChannelId || null
       : shellState.primaryView === "chat"
         ? activeChannelId || null
@@ -600,23 +830,309 @@ export function App() {
   const currentChatMessages =
     currentChatChannelId ? workspace?.messages.filter((message) => message.channelId === currentChatChannelId) ?? [] : [];
   const currentChatTargetKind =
-    shellState.primaryView === "agents" && agentWorkspace.mode === "chat"
+    isAgentWorkspaceConversationMode
       ? "agent"
       : shellState.primaryView === "chat"
         ? shellState.activeTarget.kind
         : "channel";
+  const mentionCandidates = useMemo(() => {
+    if (shellState.activeTarget.kind !== "channel") {
+      return [];
+    }
+
+    const catalog: ChannelParticipantDTO[] = [
+      ...channelParticipants,
+      ...organizationMembers.map((member) => ({
+        participantId: member.userId,
+        participantType: "user" as const,
+        displayName: member.email.split("@")[0] ?? member.email,
+        email: member.email,
+        role: member.role,
+        agentStatus: null
+      })),
+      ...((workspace?.agents ?? []).map((agent) => ({
+        participantId: agent.id,
+        participantType: "agent" as const,
+        displayName: agent.name,
+        email: null,
+        role: null,
+        agentStatus: agent.status
+      })))
+    ];
+    const deduped = new Map<string, ChannelParticipantDTO>();
+
+    for (const participant of catalog) {
+      deduped.set(`${participant.participantType}:${participant.participantId}`, participant);
+    }
+
+    const query = mentionState?.query.trim().toLowerCase() ?? "";
+
+    return Array.from(deduped.values())
+      .filter((participant) =>
+        query.length === 0
+          ? true
+          : participant.displayName.toLowerCase().includes(query) || participant.email?.toLowerCase().includes(query)
+      )
+      .sort((left, right) => {
+        if (left.participantType !== right.participantType) {
+          return left.participantType === "agent" ? -1 : 1;
+        }
+        return left.displayName.localeCompare(right.displayName);
+      })
+      .slice(0, 8);
+  }, [channelParticipants, mentionState?.query, organizationMembers, shellState.activeTarget.kind, workspace?.agents]);
+
+  useEffect(() => {
+    if (agentWorkspace.mode !== "memory" || !selectedAgentWorkspace) {
+      return;
+    }
+
+    let cancelled = false;
+    setIsAgentWorkspaceFilesLoading(true);
+    setAgentWorkspaceFilesError(null);
+
+    void api
+      .listAgentWorkspaceFiles(selectedAgentWorkspace.id)
+      .then((response) => {
+        if (cancelled) {
+          return;
+        }
+
+        setAgentWorkspaceFiles(response.files);
+        setSelectedAgentWorkspaceFilePath((current) => {
+          if (current && response.files.some((file) => file.path === current)) {
+            return current;
+          }
+
+          return response.files[0]?.path ?? null;
+        });
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+
+        setAgentWorkspaceFiles([]);
+        setSelectedAgentWorkspaceFilePath(null);
+        setAgentWorkspaceFilesError(error instanceof Error ? error.message : "Failed to load workspace files.");
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsAgentWorkspaceFilesLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [agentWorkspace.mode, selectedAgentWorkspace]);
+
+  useEffect(() => {
+    setCollapsedAgentWorkspaceFolders({});
+  }, [selectedAgentWorkspace?.id]);
+
+  useEffect(() => {
+    if (agentWorkspace.mode !== "memory" || !selectedAgentWorkspace || !selectedAgentWorkspaceFilePath) {
+      return;
+    }
+
+    const cacheKey = `${selectedAgentWorkspace.id}:${selectedAgentWorkspaceFilePath}`;
+    if (agentWorkspaceFileContents[cacheKey]) {
+      return;
+    }
+
+    let cancelled = false;
+    void api
+      .getAgentWorkspaceFileContent(selectedAgentWorkspace.id, selectedAgentWorkspaceFilePath)
+      .then((response) => {
+        if (cancelled) {
+          return;
+        }
+
+        setAgentWorkspaceFileContents((current) => ({
+          ...current,
+          [cacheKey]: response.file
+        }));
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+
+        setAgentWorkspaceFilesError(error instanceof Error ? error.message : "Failed to load workspace file content.");
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [agentWorkspace.mode, selectedAgentWorkspace, selectedAgentWorkspaceFilePath, agentWorkspaceFileContents]);
+
+  useEffect(() => {
+    if (!selectedAgentWorkspaceFilePath) {
+      return;
+    }
+
+    const parts = selectedAgentWorkspaceFilePath.split("/").slice(0, -1);
+    if (parts.length === 0) {
+      return;
+    }
+
+    setCollapsedAgentWorkspaceFolders((current) => {
+      const next = { ...current };
+      let changed = false;
+
+      for (let index = 0; index < parts.length; index += 1) {
+        const folderPath = parts.slice(0, index + 1).join("/");
+        if (next[folderPath]) {
+          next[folderPath] = false;
+          changed = true;
+        }
+      }
+
+      return changed ? next : current;
+    });
+  }, [selectedAgentWorkspaceFilePath]);
   const currentChatAgentActivityStatus =
     currentChatTargetKind === "agent"
-      ? shellState.primaryView === "agents" && agentWorkspace.mode === "chat"
+      ? isAgentWorkspaceConversationMode
         ? selectedAgentWorkspaceActivity?.status ?? null
         : activeAgentActivity?.status ?? null
       : null;
+
+  useEffect(() => {
+    if (shellState.activeTarget.kind !== "channel" || !activeChannelId) {
+      setChannelParticipants([]);
+      return;
+    }
+
+    let cancelled = false;
+
+    async function loadChannelParticipants() {
+      const response = await api.getChannelParticipants(activeChannelId);
+      if (!cancelled) {
+        setChannelParticipants(response.participants);
+      }
+    }
+
+    void loadChannelParticipants().catch(() => {
+      if (!cancelled) {
+        setChannelParticipants([]);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeChannelId, shellState.activeTarget.kind]);
+
+  useEffect(() => {
+    setChannelSettingsDraft({
+      name: activeChannel?.name ?? "",
+      description: activeChannel?.description ?? ""
+    });
+    setChannelSettingsNotice(null);
+    setMentionState(null);
+  }, [activeChannel?.description, activeChannel?.id, activeChannel?.name]);
+
+  useEffect(() => {
+    const nextSelectedIssue = selectedIssueIdForPage ? workspaceIssues.find((issue) => issue.id === selectedIssueIdForPage) ?? null : null;
+
+    if (!nextSelectedIssue) {
+      setIssueEditorNotice(null);
+      return;
+    }
+
+    setIssueEditorDraft({
+      title: nextSelectedIssue.title,
+      description: nextSelectedIssue.description,
+      status: nextSelectedIssue.status,
+      assigneeId: nextSelectedIssue.assigneeId,
+      priority: nextSelectedIssue.priority,
+      dueDate: nextSelectedIssue.dueDate ? nextSelectedIssue.dueDate.slice(0, 10) : ""
+    });
+    setIssueEditorBrief(formatIssueBrief(nextSelectedIssue.title, nextSelectedIssue.description));
+    setIssueCommentDraft("");
+    setIssueEditorNotice(null);
+  }, [selectedIssueIdForPage, workspaceIssues]);
+
+  useEffect(() => {
+    const nextSelectedIssue = selectedIssueIdForPage ? workspaceIssues.find((issue) => issue.id === selectedIssueIdForPage) ?? null : null;
+
+    if (!session || !nextSelectedIssue) {
+      return;
+    }
+
+    const payload = buildIssueEditorUpdatePayload(nextSelectedIssue);
+
+    if (!payload) {
+      return;
+    }
+
+    const requestId = issueAutosaveRequestIdRef.current + 1;
+    issueAutosaveRequestIdRef.current = requestId;
+
+    const timer = window.setTimeout(() => {
+      setIssueEditorNotice("Saving...");
+
+      void api
+        .updateIssue({
+          issueId: nextSelectedIssue.id,
+          actorId: session.userId,
+          ...payload
+        })
+        .then(async (response) => {
+          const activities = await api.getIssueActivities(nextSelectedIssue.id);
+
+          if (issueAutosaveRequestIdRef.current !== requestId) {
+            return;
+          }
+
+          setWorkspace((current) =>
+            current
+              ? {
+                  ...current,
+                  issues: current.issues.map((issue) => (issue.id === response.issue.id ? response.issue : issue)),
+                  issueActivities: [
+                    ...current.issueActivities.filter((activity) => activity.issueId !== nextSelectedIssue.id),
+                    ...activities.activities
+                  ]
+                }
+              : current
+          );
+          setIssueEditorNotice("Saved");
+        })
+        .catch(() => {
+          if (issueAutosaveRequestIdRef.current === requestId) {
+            setIssueEditorNotice("Save failed");
+          }
+        });
+    }, 500);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [issueEditorBrief, issueEditorDraft, selectedIssueIdForPage, session, workspaceIssues]);
+
   const runtimeWorkspaceAgents = selectedRuntimeWorkspace
     ? workspace?.agents.filter((agent) => agent.runtimeId === selectedRuntimeWorkspace.id) ?? []
     : [];
   const selectedImplementation = getAgentImplementationDefinition(agentDraft.implementation);
   const selectedImplementationSummary = getPublicImplementationSummary(selectedImplementation);
   const selectedIssue = detailPanel.kind === "issue" ? workspaceIssues.find((issue) => issue.id === detailPanel.itemId) ?? null : null;
+  const selectedIssueForPage = selectedIssueIdForPage ? workspaceIssues.find((issue) => issue.id === selectedIssueIdForPage) ?? null : null;
+  const selectedIssueActivities = selectedIssueForPage
+    ? (workspace?.issueActivities ?? []).filter((activity) => activity.issueId === selectedIssueForPage.id)
+    : [];
+  const selectedIssueRunLogs = selectedIssueForPage
+    ? (workspace?.agentRunLogs ?? []).filter((log) => log.issueId === selectedIssueForPage.id).slice().reverse()
+    : [];
+  const issueEditorPreview = parseIssueBrief(issueEditorBrief);
+  const selectedIssueTimeline = selectedIssueForPage
+    ? [
+        ...selectedIssueActivities.map((activity) => ({ kind: "activity" as const, createdAt: activity.createdAt, activity })),
+        ...selectedIssueRunLogs.map((log) => ({ kind: "run" as const, createdAt: log.createdAt, log }))
+      ].sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt))
+    : [];
   const selectedAgent =
     detailPanel.kind === "agent" ? workspace?.agents.find((agent) => agent.id === detailPanel.itemId) ?? null : null;
   const selectedRuntime =
@@ -626,8 +1142,14 @@ export function App() {
   const selectedMessageRecords = activeMessages.filter((message) => messageSelection.selectedIds.includes(message.id));
   const selectedIssueSourceMessages =
     selectedIssue && selectedIssue.sourceChannelId === activeChannelId ? detailContextMessages : [];
+  const selectedIssuePageSourceMessages = selectedIssueForPage?.sourceChannelId
+    ? (workspace?.messages ?? []).filter((message) => message.channelId === selectedIssueForPage.sourceChannelId)
+    : [];
   const selectedAgentForIssue =
     selectedIssue?.assigneeId ? workspace?.agents.find((agent) => agent.id === selectedIssue.assigneeId) ?? null : null;
+  const selectedAgentForIssuePage = selectedIssueForPage?.assigneeId
+    ? workspace?.agents.find((agent) => agent.id === selectedIssueForPage.assigneeId) ?? null
+    : null;
   const connectedRuntime =
     runtimeConnectPanel?.connectedRuntimeId
       ? workspace?.runtimes.find((runtime) => runtime.id === runtimeConnectPanel.connectedRuntimeId) ?? null
@@ -680,9 +1202,10 @@ export function App() {
     }
 
     let cancelled = false;
+    const channelId = currentChatChannelId;
 
     async function loadChatHistory() {
-      const payload = await api.getChannelMessages(currentChatChannelId, {
+      const payload = await api.getChannelMessages(channelId, {
         organizationId: shellState.workspaceId ?? undefined
       });
 
@@ -693,13 +1216,17 @@ export function App() {
       setWorkspace((current) =>
         current
           ? {
-              ...mergeChannelMessages(current, currentChatChannelId, payload.messages),
+              ...mergeChannelMessages(current, channelId, payload.messages),
               agentActivities: [
                 ...current.agentActivities.filter(
                   (activity) => !payload.agentActivities.some((nextActivity) => nextActivity.agentId === activity.agentId)
                 ),
                 ...payload.agentActivities
-              ]
+              ],
+              agentRunLogs: [
+                ...current.agentRunLogs.filter((log) => !payload.agentRunLogs.some((nextLog) => nextLog.id === log.id)),
+                ...payload.agentRunLogs
+              ].sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
             }
           : current
       );
@@ -734,23 +1261,24 @@ export function App() {
     }
 
     let cancelled = false;
+    const channelId = currentChatChannelId;
     const cursor = currentChatMessages[currentChatMessages.length - 1]?.createdAt;
 
     async function pollCurrentChat() {
-      const payload = await api.getChannelMessages(currentChatChannelId, {
+      const payload = await api.getChannelMessages(channelId, {
         after: cursor,
         organizationId: shellState.workspaceId ?? undefined
       });
 
-      if (cancelled || (payload.messages.length === 0 && payload.agentActivities.length === 0)) {
+      if (cancelled || (payload.messages.length === 0 && payload.agentActivities.length === 0 && payload.agentRunLogs.length === 0)) {
         return;
       }
 
       setWorkspace((current) =>
         current
           ? {
-              ...mergeChannelMessages(current, currentChatChannelId, [
-                ...current.messages.filter((message) => message.channelId === currentChatChannelId),
+              ...mergeChannelMessages(current, channelId, [
+                ...current.messages.filter((message) => message.channelId === channelId),
                 ...payload.messages
               ]),
               agentActivities: [
@@ -758,7 +1286,11 @@ export function App() {
                   (activity) => !payload.agentActivities.some((nextActivity) => nextActivity.agentId === activity.agentId)
                 ),
                 ...payload.agentActivities
-              ]
+              ],
+              agentRunLogs: [
+                ...current.agentRunLogs.filter((log) => !payload.agentRunLogs.some((nextLog) => nextLog.id === log.id)),
+                ...payload.agentRunLogs
+              ].sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
             }
           : current
       );
@@ -819,7 +1351,7 @@ export function App() {
   useEffect(() => {
     const previousCount = previousMessageCountRef.current;
     const nextCount =
-      shellState.primaryView === "agents" && agentWorkspace.mode === "chat"
+      isAgentWorkspaceConversationMode
         ? selectedAgentWorkspaceMessages.length
         : activeMessages.length;
 
@@ -828,7 +1360,7 @@ export function App() {
     }
 
     previousMessageCountRef.current = nextCount;
-  }, [activeMessages.length, agentWorkspace.mode, selectedAgentWorkspaceMessages.length, shellState.primaryView]);
+  }, [activeMessages.length, isAgentWorkspaceConversationMode, selectedAgentWorkspaceMessages.length]);
 
   async function handleLogin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -847,7 +1379,7 @@ export function App() {
       setAccountAvatarGlyphId(getAvatarGlyph(response.session.email));
       setPasswordDraft(initialPasswordDraft);
       setSettingsNotice(null);
-      navigate("/workspace/org_demo");
+      navigate("/");
     } catch (loginError) {
       setError(loginError instanceof Error ? loginError.message : "Unable to sign in.");
     } finally {
@@ -871,7 +1403,7 @@ export function App() {
       await api.register({
         email: credentials.email.trim()
       });
-      setAuthNotice("Signup request captured. Use the demo credentials to enter the workspace.");
+      setAuthNotice("Signup request captured. Sign in to create or join a workspace.");
     } catch (registerError) {
       setError(registerError instanceof Error ? registerError.message : "Unable to sign up.");
     } finally {
@@ -1045,13 +1577,13 @@ export function App() {
   }
 
   async function handleGenerateCommand() {
-    if (!session) {
+    if (!session || !shellState.workspaceId) {
       return;
     }
 
     setIsCreateAgentModalOpen(false);
     const command = await api.createRuntimeRegistrationCommand(
-      session.organizationId,
+      shellState.workspaceId,
       session.userId,
       session.role === "owner" ? "owner" : "admin"
     );
@@ -1291,7 +1823,19 @@ export function App() {
     try {
       const result = await api.createChannel({
         organizationId: workspace.organization.id,
-        name: channelDraftName
+        name: channelDraftName,
+        description: channelDraftDescription,
+        actorId: session.userId,
+        members: [
+          ...channelDraftUserIds.map((participantId) => ({
+            participantId,
+            participantType: "user" as const
+          })),
+          ...channelDraftAgentIds.map((participantId) => ({
+            participantId,
+            participantType: "agent" as const
+          }))
+        ]
       });
       const nextWorkspace = await reloadWorkspaceSnapshot();
       const path = buildPath(`/workspace/:workspaceId/channel/:channelId`, {
@@ -1305,6 +1849,9 @@ export function App() {
       setIsChannelCreateOpen(false);
       setIsChannelCreateModalOpen(false);
       setChannelDraftName("");
+      setChannelDraftDescription("");
+      setChannelDraftUserIds([]);
+      setChannelDraftAgentIds([]);
       setDetailPanel(initialDetailPanelState);
     } catch {
       return;
@@ -1316,14 +1863,30 @@ export function App() {
     setIsChannelCreateOpen(false);
   }
 
+  function toggleChannelDraftUser(userId: string) {
+    setChannelDraftUserIds((current) =>
+      current.includes(userId) ? current.filter((entry) => entry !== userId) : [...current, userId]
+    );
+  }
+
+  function toggleChannelDraftAgent(agentId: string) {
+    setChannelDraftAgentIds((current) =>
+      current.includes(agentId) ? current.filter((entry) => entry !== agentId) : [...current, agentId]
+    );
+  }
+
   function handleCloseChannelCreateModal() {
     setIsChannelCreateModalOpen(false);
     setChannelDraftName("");
+    setChannelDraftDescription("");
+    setChannelDraftUserIds([]);
+    setChannelDraftAgentIds([]);
   }
 
   function handleLogout() {
     setSession(null);
     setIsSessionReady(true);
+    setIsWorkspacesReady(false);
     setWorkspace(null);
     setComposerValue("");
     setComposerAttachments([]);
@@ -1343,13 +1906,18 @@ export function App() {
     setIsWorkspaceSwitcherOpen(false);
     setIsWorkspaceCreateOpen(false);
     setWorkspaceDraftName("");
+    setIsWorkspacesReady(false);
     setAgentDirectChannelIds({});
-    setWorkspaceOptions(initialWorkspaceOptions);
+    setWorkspaceOptions([]);
     setIsChannelsCollapsed(false);
     setIsAgentsCollapsed(false);
     setChannelDraftName("");
+    setChannelDraftDescription("");
+    setChannelDraftUserIds([]);
+    setChannelDraftAgentIds([]);
+    setOrganizationMembers([]);
     setExpandedRuntimeIds({});
-    setShellState(createInitialShellState([], "org_demo"));
+    setShellState(createInitialShellState([], ""));
     setAgentWorkspace(createInitialAgentWorkspaceBrowserState(null));
     setRuntimeWorkspace(createInitialRuntimeWorkspaceBrowserState(null));
     setSelectedRuntimeIdForPage(null);
@@ -1367,6 +1935,12 @@ export function App() {
   }
 
   function handleOpenSettingsPage() {
+    const workspaceId = shellState.workspaceId;
+
+    if (!workspaceId) {
+      return;
+    }
+
     setIsAccountMenuOpen(false);
     setIsThemeModeMenuOpen(false);
     setIsCreateAgentModalOpen(false);
@@ -1375,14 +1949,23 @@ export function App() {
     setIsExplorerOpen(true);
     setShellState((current) => selectPrimaryView(current, "settings"));
     setDetailPanel(initialDetailPanelState);
+    navigate(buildPath("/workspace/:workspaceId/settings", { workspaceId }));
+  }
+
+  function handleCloseSettingsPage() {
+    const fallbackPath = shellState.workspaceId
+      ? buildPath("/workspace/:workspaceId", { workspaceId: shellState.workspaceId })
+      : "/";
+
+    navigate(previousNonSettingsPathRef.current || fallbackPath);
   }
 
   function handleSelectWorkspace(workspaceId: string) {
-    if (!workspace) {
-      return;
-    }
-
-    setShellState((current) => selectWorkspace(current, workspaceId, workspace.channels));
+    navigate(buildPath("/workspace/:workspaceId", { workspaceId }));
+    setWorkspace(null);
+    setOrganizationMembers([]);
+    setWorkspaceInvitations([]);
+    setShellState((current) => selectWorkspace(current, workspaceId, []));
     setCenterView("chat");
     setDetailPanel(initialDetailPanelState);
     setIsAccountMenuOpen(false);
@@ -1394,43 +1977,46 @@ export function App() {
     setMessageContextMenu(null);
     setIsChannelCreateOpen(false);
     setChannelDraftName("");
+    setChannelDraftDescription("");
+    setChannelDraftUserIds([]);
+    setChannelDraftAgentIds([]);
     setIsCreateAgentModalOpen(false);
+    setSelectedUserIdForPage(null);
+    setSelectedRuntimeIdForPage(null);
   }
 
-  function handleCreateWorkspaceOption() {
+  async function handleCreateWorkspaceOption() {
+    if (!session) {
+      return;
+    }
+
     const label = workspaceDraftName.trim();
 
     if (!label) {
       return;
     }
 
-    const idBase = label
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "_")
-      .replace(/^_+|_+$/g, "")
-      .slice(0, 24);
-    let nextId = `org_${idBase || "workspace"}`;
-    let suffix = 1;
-
-    while (workspaceOptions.some((option) => option.id === nextId)) {
-      suffix += 1;
-      nextId = `org_${idBase || "workspace"}_${suffix}`;
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9 _-]*$/.test(label)) {
+      return;
     }
 
+    const result = await api.createWorkspace({
+      userId: session.userId,
+      name: label,
+      description: workspaceDraftDescription.trim() || undefined
+    });
     const nextOption = {
-      id: nextId,
-      label,
-      description: `/${label}`
+      id: result.workspace.id,
+      label: result.workspace.name,
+      description: `/${result.workspace.slug}`
     };
 
     setWorkspaceOptions((current) => [...current, nextOption]);
     setWorkspaceDraftName("");
+    setWorkspaceDraftDescription("");
     setIsWorkspaceCreateOpen(false);
-
-    if (workspace) {
-      handleSelectWorkspace(nextOption.id);
-    }
     setIsWorkspaceSwitcherOpen(false);
+    handleSelectWorkspace(nextOption.id);
   }
 
   function handleSelectConversation(kind: "channel" | "agent", id: string) {
@@ -1468,7 +2054,7 @@ export function App() {
     setIsCreateAgentModalOpen(false);
   }
 
-  function handleSelectPrimaryView(primaryView: "chat" | "kanban" | "agents" | "runtimes" | "settings") {
+  function handleSelectPrimaryView(primaryView: "chat" | "kanban" | "agents" | "runtimes" | "users" | "settings") {
     const path = buildPath(`/workspace/:workspaceId/${primaryView === "kanban" ? "issues" : primaryView}`, {
       workspaceId: shellState.workspaceId,
     });
@@ -1485,7 +2071,7 @@ export function App() {
     setIsChannelCreateOpen(false);
   }
 
-  function handleSelectActivityView(primaryView: "chat" | "kanban" | "agents" | "runtimes" | "settings") {
+  function handleSelectActivityView(primaryView: "chat" | "kanban" | "agents" | "runtimes" | "users" | "settings") {
     if (shellState.primaryView === primaryView) {
       setIsExplorerOpen((current) => !current);
       return;
@@ -1548,6 +2134,37 @@ export function App() {
     setDetailPanel(initialDetailPanelState);
     setAgentActionNotice(null);
     setAgentActionDialog(null);
+  }
+
+  function handleOpenUserPage(userId: string) {
+    setSelectedUserIdForPage(userId);
+    const path = buildPath("/workspace/:workspaceId/user/:userId", {
+      workspaceId: shellState.workspaceId,
+      userId
+    });
+    navigate(path);
+    setShellState((current) => selectPrimaryView(current, "users"));
+    setDetailPanel(initialDetailPanelState);
+  }
+
+  async function handleInviteMember() {
+    if (!session || !workspace?.organization) return;
+    const email = inviteEmail.trim();
+    if (!email) return;
+
+    try {
+      const result = await api.createWorkspaceInvitation({
+        organizationId: workspace.organization.id,
+        email,
+        role: inviteRole,
+        invitedBy: session.userId
+      });
+      setWorkspaceInvitations((current) => [...current, result.invitation]);
+      setInviteEmail("");
+      setInviteRole("member");
+    } catch {
+      // silently ignore for now
+    }
   }
 
   function handleCloseAgentCreateModal() {
@@ -1686,6 +2303,28 @@ export function App() {
     setIsIssueCreateModalOpen(true);
   }
 
+  function handleOpenIssueWorkspace(issueId: string) {
+    if (!shellState.workspaceId) {
+      return;
+    }
+
+    setSelectedIssueIdForPage(issueId);
+    setCenterView("issues");
+    setShellState((current) => selectPrimaryView(current, "kanban"));
+    navigate(buildPath("/workspace/:workspaceId/issues/:issueId", { workspaceId: shellState.workspaceId, issueId }));
+  }
+
+  function handleCloseIssueWorkspace() {
+    if (!shellState.workspaceId) {
+      return;
+    }
+
+    setSelectedIssueIdForPage(null);
+    setCenterView("issues");
+    setShellState((current) => selectPrimaryView(current, "kanban"));
+    navigate(buildPath("/workspace/:workspaceId/issues", { workspaceId: shellState.workspaceId }));
+  }
+
   function handleCloseIssueCreateModal() {
     setIsIssueCreateModalOpen(false);
     setIssueCreateDraft(initialIssueCreateDraft());
@@ -1749,14 +2388,20 @@ export function App() {
     try {
       const response = await api.updateIssue({
         issueId,
+        actorId: session?.userId ?? "system",
         status: nextStatus
       });
+      const activities = await api.getIssueActivities(issueId);
 
       setWorkspace((current) =>
         current
           ? {
               ...current,
-              issues: current.issues.map((issue) => (issue.id === issueId ? response.issue : issue))
+              issues: current.issues.map((issue) => (issue.id === issueId ? response.issue : issue)),
+              issueActivities: [
+                ...current.issueActivities.filter((activity) => activity.issueId !== issueId),
+                ...activities.activities
+              ]
             }
           : current
       );
@@ -1772,6 +2417,97 @@ export function App() {
     } finally {
       setDraggingIssueId(null);
       setKanbanDropLane(null);
+    }
+  }
+
+  function buildIssueEditorUpdatePayload(issue: IssueDTO) {
+    const parsedBrief = parseIssueBrief(issueEditorBrief);
+
+    if (!parsedBrief.title.trim()) {
+      return null;
+    }
+
+    const normalizedCurrentDueDate = issue.dueDate ? issue.dueDate.slice(0, 10) : "";
+    const normalizedDraftDueDate = issueEditorDraft.dueDate;
+
+    const payload = {
+      title: parsedBrief.title.trim() === issue.title ? undefined : parsedBrief.title.trim(),
+      description: parsedBrief.description.trim() === issue.description ? undefined : parsedBrief.description.trim(),
+      status: issueEditorDraft.status === issue.status ? undefined : issueEditorDraft.status,
+      assigneeId: issueEditorDraft.assigneeId === issue.assigneeId ? undefined : issueEditorDraft.assigneeId,
+      priority: issueEditorDraft.priority === issue.priority ? undefined : issueEditorDraft.priority,
+      dueDate:
+        normalizedDraftDueDate === normalizedCurrentDueDate
+          ? undefined
+          : normalizedDraftDueDate
+            ? new Date(normalizedDraftDueDate).toISOString()
+            : null,
+      project: undefined as string | null | undefined
+    };
+
+    const hasChanges = Object.values(payload).some((value) => value !== undefined);
+    return hasChanges ? payload : null;
+  }
+
+  async function handleCreateIssueComment() {
+    if (!session || !selectedIssueForPage || !issueCommentDraft.trim()) {
+      return;
+    }
+
+    const response = await api.createIssueComment({
+      issueId: selectedIssueForPage.id,
+      actorId: session.userId,
+      actorType: "user",
+      message: issueCommentDraft.trim()
+    });
+
+    setWorkspace((current) =>
+      current
+        ? {
+            ...current,
+            issueActivities: [...current.issueActivities, response.activity],
+            issues: current.issues.map((issue) =>
+              issue.id === selectedIssueForPage.id
+                ? {
+                    ...issue,
+                    updatedAt: response.activity.createdAt
+                  }
+                : issue
+            )
+          }
+        : current
+    );
+    setIssueCommentDraft("");
+  }
+
+  async function handleDeleteIssue(issueId: string) {
+    if (!session) {
+      return;
+    }
+
+    const confirmed = window.confirm("Delete this issue?");
+    if (!confirmed) {
+      return;
+    }
+
+    await api.deleteIssue({
+      issueId,
+      actorId: session.userId
+    });
+
+    setWorkspace((current) =>
+      current
+        ? {
+            ...current,
+            issues: current.issues.filter((issue) => issue.id !== issueId),
+            issueActivities: current.issueActivities.filter((activity) => activity.issueId !== issueId),
+            agentRunLogs: current.agentRunLogs.filter((log) => log.issueId !== issueId)
+          }
+        : current
+    );
+
+    if (selectedIssueIdForPage === issueId) {
+      handleCloseIssueWorkspace();
     }
   }
 
@@ -1798,7 +2534,112 @@ export function App() {
     setBulkIssueDescription("");
   }
 
+  function syncMentionState(nextValue: string, caret: number | null) {
+    if (shellState.activeTarget.kind !== "channel" || caret === null) {
+      setMentionState(null);
+      return;
+    }
+
+    const nextMention = getMentionDraft(nextValue, caret);
+    setMentionState((current) =>
+      nextMention
+        ? {
+            ...nextMention,
+            selectedIndex: current && current.query === nextMention.query ? current.selectedIndex : 0
+          }
+        : null
+    );
+  }
+
+  function handleComposerChange(value: string, caret: number | null) {
+    setComposerValue(value);
+    syncMentionState(value, caret);
+  }
+
+  function applyMentionSelection(participant: ChannelParticipantDTO) {
+    if (!mentionState) {
+      return;
+    }
+
+    const nextValue = `${composerValue.slice(0, mentionState.start)}@${participant.displayName} ${composerValue.slice(mentionState.end)}`;
+    const nextCaret = mentionState.start + participant.displayName.length + 2;
+
+    setComposerValue(nextValue);
+    setMentionState(null);
+
+    window.requestAnimationFrame(() => {
+      composerTextareaRef.current?.focus();
+      composerTextareaRef.current?.setSelectionRange(nextCaret, nextCaret);
+    });
+  }
+
+  async function handleSaveChannelSettings() {
+    if (!activeChannel) {
+      return;
+    }
+
+    try {
+      const response = await api.updateChannel({
+        channelId: activeChannel.id,
+        name: channelSettingsDraft.name,
+        description: channelSettingsDraft.description
+      });
+
+      setWorkspace((current) =>
+        current
+          ? {
+              ...current,
+              channels: current.channels.map((channel) =>
+                channel.id === response.channel.id ? { ...channel, ...response.channel } : channel
+              )
+            }
+          : current
+      );
+      setChannelSettingsNotice("Saved");
+      window.setTimeout(() => {
+        setIsChannelSettingsOpen(false);
+        setChannelSettingsNotice(null);
+      }, 600);
+    } catch (saveError) {
+      setChannelSettingsNotice(saveError instanceof Error ? saveError.message : "Unable to save channel.");
+    }
+  }
+
   function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (mentionState && mentionCandidates.length > 0) {
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        setMentionState((current) =>
+          current
+            ? { ...current, selectedIndex: (current.selectedIndex + 1) % mentionCandidates.length }
+            : current
+        );
+        return;
+      }
+
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        setMentionState((current) =>
+          current
+            ? { ...current, selectedIndex: (current.selectedIndex - 1 + mentionCandidates.length) % mentionCandidates.length }
+            : current
+        );
+        return;
+      }
+
+      if (event.key === "Enter" || event.key === "Tab") {
+        event.preventDefault();
+        applyMentionSelection(mentionCandidates[mentionState.selectedIndex] ?? mentionCandidates[0]!);
+        return;
+      }
+
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setMentionState(null);
+        return;
+      }
+    }
+
     if (
       shouldSendMessageFromKeypress({
         key: event.key,
@@ -1828,7 +2669,7 @@ export function App() {
     return (
       <main className="flex min-h-screen items-center justify-center bg-[radial-gradient(circle_at_top,_#ffffff_0%,_#eef4ff_58%,_#e2e8f0_100%)] px-6 py-10 text-neutral-950">
         <div className="rounded-[1.5rem] border border-neutral-200 bg-white/85 px-6 py-5 text-sm font-medium text-neutral-600 shadow-[0_12px_40px_rgba(15,23,42,0.08)] backdrop-blur-sm">
-          Loading workspace...
+          Loading app...
         </div>
       </main>
     );
@@ -1860,10 +2701,10 @@ export function App() {
 
           <Card className="self-center border-neutral-200 bg-white">
             <CardHeader>
-              <Badge className="w-fit border-sky-200 bg-sky-50 text-sky-700">Demo Login</Badge>
-              <CardTitle className="text-3xl font-semibold tracking-[-0.03em]">Enter the workspace</CardTitle>
+              <Badge className="w-fit border-sky-200 bg-sky-50 text-sky-700">Workspace Sign In</Badge>
+              <CardTitle className="text-3xl font-semibold tracking-[-0.03em]">Sign in to WorkPilot</CardTitle>
               <CardDescription>
-                The demo organization ships with a connected runtime daemon, one Agent, a seeded channel, and issue history.
+                Sign in to load your workspaces. If you do not have one yet, WorkPilot will ask you to create your first workspace.
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -1921,7 +2762,7 @@ export function App() {
                 <div className="flex flex-col gap-3">
                   <Button className="w-full" disabled={isSubmitting} size="lg" type="submit">
                     <UserRound className="size-4" />
-                    {isSubmitting && activeAuthAction === "login" ? "Signing in..." : "Enter Demo Workspace"}
+                    {isSubmitting && activeAuthAction === "login" ? "Signing in..." : "Enter WorkPilot"}
                   </Button>
                   <button
                     className="text-sm font-medium text-neutral-500 transition hover:text-[var(--accent-strong)]"
@@ -1930,15 +2771,72 @@ export function App() {
                       event.preventDefault();
                       setCredentials(initialCredentials);
                       setError(null);
-                      setAuthNotice("Demo credentials restored.");
+                      setAuthNotice("Default credentials restored.");
                       setActiveAuthAction("login");
                     }}
                     type="button"
                   >
-                    Restore demo credentials
+                    Restore default credentials
                   </button>
                 </div>
               </form>
+            </CardContent>
+          </Card>
+        </div>
+      </main>
+    );
+  }
+
+  if (!isWorkspacesReady) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-[radial-gradient(circle_at_top,_#ffffff_0%,_#eef4ff_58%,_#e2e8f0_100%)] px-6 py-10 text-neutral-950">
+        <div className="rounded-[1.5rem] border border-neutral-200 bg-white/85 px-6 py-5 text-sm font-medium text-neutral-600 shadow-[0_12px_40px_rgba(15,23,42,0.08)] backdrop-blur-sm">
+          Loading workspaces...
+        </div>
+      </main>
+    );
+  }
+
+  if (workspaceOptions.length === 0) {
+    return (
+      <main className="min-h-screen bg-[radial-gradient(circle_at_top,_#ffffff_0%,_#eef4ff_58%,_#e2e8f0_100%)] px-6 py-10 text-neutral-950">
+        <div className="mx-auto flex min-h-[calc(100vh-5rem)] max-w-3xl items-center justify-center">
+          <Card className="w-full border-neutral-200 bg-white">
+            <CardHeader>
+              <Badge className="w-fit border-amber-200 bg-amber-50 text-amber-700">Workspace Required</Badge>
+              <CardTitle className="text-3xl font-semibold tracking-[-0.03em]">Create your first workspace</CardTitle>
+              <CardDescription>
+                Your account does not have any workspaces yet. Create one before entering the main app.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-4">
+              <div>
+                <Input
+                  autoFocus
+                  onChange={(event) => setWorkspaceDraftName(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      void handleCreateWorkspaceOption();
+                    }
+                  }}
+                  placeholder="Workspace name"
+                  value={workspaceDraftName}
+                />
+                {workspaceDraftName.trim() && !/^[a-zA-Z0-9][a-zA-Z0-9 _-]*$/.test(workspaceDraftName.trim()) ? (
+                  <p className="mt-1.5 text-sm text-red-500">Only letters, digits, spaces, hyphens, and underscores allowed. Must start with a letter or digit.</p>
+                ) : null}
+              </div>
+              <Input
+                onChange={(event) => setWorkspaceDraftDescription(event.target.value)}
+                placeholder="Description (optional)"
+                value={workspaceDraftDescription}
+              />
+              <div className="flex justify-end">
+                <Button disabled={!workspaceDraftName.trim() || !/^[a-zA-Z0-9][a-zA-Z0-9 _-]*$/.test(workspaceDraftName.trim())} onClick={() => void handleCreateWorkspaceOption()} type="button">
+                  Create Workspace
+                </Button>
+              </div>
             </CardContent>
           </Card>
         </div>
@@ -2001,11 +2899,21 @@ export function App() {
                         placeholder="Workspace name"
                         value={workspaceDraftName}
                       />
+                      {workspaceDraftName.trim() && !/^[a-zA-Z0-9][a-zA-Z0-9 _-]*$/.test(workspaceDraftName.trim()) ? (
+                        <p className="mt-1.5 text-xs text-red-500">Only letters, digits, spaces, hyphens, and underscores.</p>
+                      ) : null}
+                      <Input
+                        className="mt-2 h-10"
+                        onChange={(event) => setWorkspaceDraftDescription(event.target.value)}
+                        placeholder="Description (optional)"
+                        value={workspaceDraftDescription}
+                      />
                       <div className="mt-3 flex items-center justify-end gap-2">
                         <Button
                           onClick={() => {
                             setIsWorkspaceCreateOpen(false);
                             setWorkspaceDraftName("");
+                            setWorkspaceDraftDescription("");
                           }}
                           size="sm"
                           type="button"
@@ -2013,7 +2921,7 @@ export function App() {
                         >
                           Cancel
                         </Button>
-                        <Button disabled={!workspaceDraftName.trim()} onClick={handleCreateWorkspaceOption} size="sm" type="button">
+                        <Button disabled={!workspaceDraftName.trim() || !/^[a-zA-Z0-9][a-zA-Z0-9 _-]*$/.test(workspaceDraftName.trim())} onClick={handleCreateWorkspaceOption} size="sm" type="button">
                           Create
                         </Button>
                       </div>
@@ -2057,6 +2965,12 @@ export function App() {
               icon={Monitor}
               label="Runtimes"
               onClick={() => handleSelectActivityView("runtimes")}
+            />
+            <ActivityBarButton
+              active={shellState.primaryView === "users"}
+              icon={UsersRound}
+              label="Members"
+              onClick={() => handleSelectActivityView("users")}
             />
           </div>
 
@@ -2106,17 +3020,16 @@ export function App() {
             <p className="mt-1 text-base font-semibold tracking-[-0.03em] text-neutral-950">{selectedWorkspaceOption.label}</p>
           </div>
 
+{shellState.primaryView !== "settings" && (
           <div className="border-b border-neutral-200 px-4 py-3">
             <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-500">
               {shellState.primaryView === "chat"
                 ? "Chats"
                 : shellState.primaryView === "kanban"
-                  ? "Kanban"
+                  ? "Workspace"
                 : shellState.primaryView === "agents"
                   ? "Agents"
-                  : shellState.primaryView === "runtimes"
-                    ? "Runtimes"
-                    : "Settings"}
+                : "Runtimes"}
             </p>
             <p className="mt-1 text-xs text-neutral-400">
               {shellState.primaryView === "chat"
@@ -2125,11 +3038,10 @@ export function App() {
                   ? `${workspaceIssues.length} issues`
                 : shellState.primaryView === "agents"
                   ? `${workspace?.agents.length ?? 0} available agents`
-                  : shellState.primaryView === "runtimes"
-                    ? `${workspace?.runtimes.length ?? 0} connected hosts`
-                    : "Profile and preferences"}
+                  : `${workspace?.runtimes.length ?? 0} connected hosts`}
             </p>
           </div>
+          )}
 
           <div className="min-h-0 flex-1 overflow-y-auto px-3 py-4">
             {shellState.primaryView === "chat" ? (
@@ -2300,25 +3212,47 @@ export function App() {
               </div>
             ) : null}
 
-            {shellState.primaryView === "settings" ? (
-              <div className="grid gap-3">
-                <div className="rounded-[1rem] border border-neutral-200 bg-white p-4">
-                  <p className="text-sm font-semibold text-neutral-900">{accountName}</p>
-                  <p className="mt-1 text-xs text-neutral-500">{session.email}</p>
+            {shellState.primaryView === "users" ? (
+              <div className="space-y-4">
+                <div className="mb-3 flex items-center justify-between gap-3 px-1">
+                  <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-400">Members</p>
                 </div>
-                <div className="rounded-[1rem] border border-neutral-200 bg-white p-4">
-                  <p className="text-sm font-medium text-neutral-900">Appearance</p>
-                  <p className="mt-1 text-xs text-neutral-500">{getThemeModeOption(themeMode).label}</p>
+                <div className="grid gap-1.5">
+                  {organizationMembers.map((member) => {
+                    const isSelected = selectedUserIdForPage === member.userId;
+                    return (
+                      <button
+                        key={member.userId}
+                        className={`rounded-[0.95rem] border px-3 py-3 text-left transition ${
+                          isSelected
+                            ? "border-blue-200 bg-blue-50/80"
+                            : "border-transparent bg-white/70 hover:border-neutral-200 hover:bg-white"
+                        }`}
+                        onClick={() => handleOpenUserPage(member.userId)}
+                        type="button"
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-medium text-neutral-900">{member.email.split("@")[0]}</p>
+                            <p className="mt-1 truncate font-mono text-[11px] text-neutral-500">{member.userId}</p>
+                          </div>
+                          <span className="shrink-0 rounded-full bg-neutral-100 px-2 py-0.5 text-[11px] font-medium text-neutral-600">{member.role}</span>
+                        </div>
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
             ) : null}
+
+
           </div>
         </aside>
         ) : null}
 
         <section className="shell-panel shell-panel--main flex h-full min-h-0 flex-col overflow-hidden rounded-none">
           {shellState.primaryView === "chat" ? (
-            <div className={chatPanelLayoutClassNames.shell}>
+            <div className={`${chatPanelLayoutClassNames.shell} relative`}>
               <div className={`${chatPanelLayoutClassNames.topChrome} bg-[linear-gradient(180deg,rgba(255,255,255,0.98)_0%,rgba(251,252,255,0.96)_100%)] backdrop-blur-sm`}>
                 <div className={`${chatPanelLayoutClassNames.header} border-b border-neutral-200 px-4 py-4 lg:px-5`}>
                   <div className="flex flex-wrap items-start justify-between gap-4">
@@ -2329,9 +3263,6 @@ export function App() {
                         <Bot className="size-5 text-[var(--accent)]" />
                       )}
                       <div className="min-w-0">
-                        <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--accent-strong)]">
-                          {shellState.activeTarget.kind === "agent" ? "Active agent thread" : "Current thread"}
-                        </p>
                         <h1 className="truncate text-[24px] font-semibold tracking-[-0.04em] lg:text-[26px]">
                           {formatConversationTitle({
                             kind: shellState.activeTarget.kind,
@@ -2340,14 +3271,59 @@ export function App() {
                                 ? getChannelDisplayName(activeChannel ?? { id: "", type: "group", name: "all" })
                                 : activeAgent?.name ?? "Agent"
                           })}
+                          {activeConversationDescription ? (
+                            <span className="ml-3 align-middle text-[13px] font-medium tracking-normal text-neutral-500 lg:text-[14px]">
+                              {activeConversationDescription}
+                            </span>
+                          ) : null}
                         </h1>
                       </div>
                     </div>
-                    <div className="flex flex-wrap items-center justify-end gap-2">
-                      <Badge>{activeMessages.length} messages</Badge>
-                      <Badge>{activeIssues.length} issues</Badge>
+                    <div className="flex flex-wrap items-center justify-end gap-2.5">
+                      {shellState.activeTarget.kind === "channel" ? (
+                        <>
+                          <button
+                            className={`inline-flex items-center gap-2 rounded-[0.95rem] px-3 py-2 text-sm font-medium ring-1 transition ${
+                              isChannelSettingsOpen
+                                ? "bg-[var(--accent-soft)] text-[var(--accent-strong)] ring-[color:color-mix(in_srgb,var(--accent)_26%,white)]"
+                                : "bg-white/75 text-neutral-700 ring-neutral-200/80 hover:bg-white hover:ring-neutral-300"
+                            }`}
+                            onClick={() => {
+                              setIsChannelMembersOpen(false);
+                              setIsChannelSettingsOpen((current) => !current);
+                            }}
+                            type="button"
+                          >
+                            <SlidersHorizontal className="size-4" />
+                            Channel
+                          </button>
+                          <button
+                            className={`inline-flex items-center gap-2 rounded-[0.95rem] px-3 py-2 text-sm font-medium ring-1 transition ${
+                              isChannelMembersOpen
+                                ? "bg-[var(--accent-soft)] text-[var(--accent-strong)] ring-[color:color-mix(in_srgb,var(--accent)_26%,white)]"
+                                : "bg-white/75 text-neutral-700 ring-neutral-200/80 hover:bg-white hover:ring-neutral-300"
+                            }`}
+                            onClick={() => {
+                              setIsChannelSettingsOpen(false);
+                              setIsChannelMembersOpen((current) => !current);
+                            }}
+                            type="button"
+                          >
+                            <UsersRound className="size-4" />
+                            {activeChannelParticipantCount}
+                          </button>
+                        </>
+                      ) : null}
+                      <span className="rounded-full bg-white/72 px-2.5 py-1 font-mono text-[11px] text-neutral-500 ring-1 ring-neutral-200/80">
+                        {activeMessages.length} messages
+                      </span>
+                      <span className="rounded-full bg-white/72 px-2.5 py-1 font-mono text-[11px] text-neutral-500 ring-1 ring-neutral-200/80">
+                        {activeIssues.length} issues
+                      </span>
                       {activeAgent ? (
-                        <Badge>{activeAgentActivityBadge?.label ?? (activeAgentLifecycleState === "running" ? "running" : "stopped")}</Badge>
+                        <span className="rounded-full bg-white/72 px-2.5 py-1 font-mono text-[11px] text-neutral-500 ring-1 ring-neutral-200/80">
+                          {activeAgentActivityBadge?.label ?? (activeAgentLifecycleState === "running" ? "running" : "stopped")}
+                        </span>
                       ) : null}
                       {activeAgent ? (
                         <>
@@ -2355,19 +3331,20 @@ export function App() {
                             onClick={() => handleOpenLifecycleDialog(activeAgentLifecycleState === "running" ? "stopped" : "running")}
                             size="sm"
                             type="button"
-                            variant="secondary"
+                            className="bg-white/76 ring-1 ring-neutral-200/80 hover:bg-white hover:ring-neutral-300"
+                            variant="ghost"
                           >
                             {activeAgentLifecycleState === "running" ? "Stop" : "Start"}
                           </Button>
-                          <Button onClick={handleOpenRestartDialog} size="sm" type="button" variant="secondary">
+                          <Button onClick={() => handleOpenRestartDialog()} size="sm" type="button" className="bg-white/76 ring-1 ring-neutral-200/80 hover:bg-white hover:ring-neutral-300" variant="ghost">
                             Restart
                           </Button>
                           <Button
-                            className="border-rose-200 text-rose-700 hover:bg-rose-50 hover:text-rose-800"
-                            onClick={handleOpenDeleteDialog}
+                            className="bg-rose-50/70 text-rose-700 ring-1 ring-rose-200/80 hover:bg-rose-50 hover:text-rose-800 hover:ring-rose-300"
+                            onClick={() => handleOpenDeleteDialog()}
                             size="sm"
                             type="button"
-                            variant="secondary"
+                            variant="ghost"
                           >
                             Delete
                           </Button>
@@ -2376,7 +3353,7 @@ export function App() {
                     </div>
                   </div>
                   {agentActionNotice ? (
-                    <div className="mt-4 rounded-[1rem] border border-[rgba(244,114,182,0.2)] bg-[rgba(255,241,248,0.96)] px-3 py-3 text-sm text-neutral-700 shadow-[0_8px_24px_rgba(244,114,182,0.08)]">
+                    <div className="mt-4 rounded-[1rem] bg-[rgba(255,241,248,0.92)] px-3 py-3 text-sm text-neutral-700 ring-1 ring-[rgba(244,114,182,0.18)] shadow-[0_8px_24px_rgba(244,114,182,0.08)]">
                       {agentActionNotice}
                     </div>
                   ) : null}
@@ -2401,9 +3378,9 @@ export function App() {
 
               <div className={`${chatPanelLayoutClassNames.content} px-4 py-4 lg:px-5`}>
                 {centerView === "chat" ? (
-                  <div className="relative flex h-full min-h-0 flex-col">
+                  <div className="relative flex h-full min-h-0 flex-col overflow-hidden rounded-[1.3rem] bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(246,248,247,0.96))] ring-1 ring-neutral-200/80 shadow-[0_12px_28px_rgba(15,23,42,0.05)]">
                     {messageSelection.isMultiSelectMode ? (
-                      <div className="mb-3 rounded-[1rem] border border-[var(--warning-border)] bg-[var(--warning-soft)] px-3 py-3 shadow-[0_8px_18px_rgba(245,158,11,0.14)]">
+                      <div className="mx-4 mt-4 rounded-[1rem] border border-[var(--warning-border)] bg-[var(--warning-soft)] px-3 py-3 shadow-[0_8px_18px_rgba(245,158,11,0.14)]">
                         <div className="flex flex-wrap items-start justify-between gap-3">
                           <div>
                           <p className="text-sm font-semibold text-neutral-900">{messageSelection.selectedIds.length} messages selected</p>
@@ -2434,7 +3411,7 @@ export function App() {
                       </div>
                     ) : null}
 
-                    <div ref={messageScrollerRef} className={`${chatPanelLayoutClassNames.scroller} rounded-[1.15rem] border border-neutral-200 bg-[var(--panel-elevated)] p-3`}>
+                    <div ref={messageScrollerRef} className={`${chatPanelLayoutClassNames.scroller} px-4 py-4`}>
                       <div className="grid gap-1">
                       {activeMessages.length === 0 ? (
                         <EmptyState>No messages yet. Start the conversation.</EmptyState>
@@ -2474,8 +3451,8 @@ export function App() {
                                     </span>
                                   ) : null}
                                   {message.senderType === "agent" ? (
-                                    <div className={`${getActorAvatarClass(tone)} mt-0.5 size-10`}>
-                                      <Bot className="size-4" />
+                                    <div className={`${getActorAvatarClass(tone)} mt-0.5 size-12`}>
+                                      <Bot className="size-[18px]" />
                                     </div>
                                   ) : (
                                     <AvatarBadge
@@ -2491,12 +3468,12 @@ export function App() {
                                           ? accountAvatarPaletteId
                                           : getAvatarPalette(message.senderId).id
                                       }
-                                      size="sm"
+                                      size="md"
                                     />
                                   )}
                                   <div className="min-w-0 flex-1">
                                     <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                                      <span className={tone === "agent" ? "font-mono text-[12.5px] font-semibold text-neutral-950" : "text-[13px] font-semibold text-neutral-900"}>
+                                      <span className="text-[13px] font-semibold text-neutral-900">
                                         {senderDisplayName}
                                       </span>
                                       {tone === "agent" ? <StatusDot tone="success" /> : null}
@@ -2511,8 +3488,17 @@ export function App() {
                                       </div>
                                     ) : null}
                                     {message.content ? (
-                                      <p className={`mt-1.5 select-text whitespace-pre-wrap break-words leading-6 ${tone === "agent" ? "font-mono text-[12.5px] text-neutral-800" : "text-[13px] text-neutral-700"}`}>
-                                        {message.content}
+                                      <p className="mt-1.5 select-text whitespace-pre-wrap break-words leading-6 text-[13px] text-neutral-700">
+                                        <MessageContent
+                                          content={message.content}
+                                          agents={workspace?.agents ?? []}
+                                          onAgentClick={(agentId) => {
+                                            handleOpenAgentWorkspace(agentId);
+                                          }}
+                                          onUserClick={(userId) => {
+                                            handleOpenUserPage(userId);
+                                          }}
+                                        />
                                       </p>
                                     ) : null}
                                   </div>
@@ -2574,7 +3560,7 @@ export function App() {
                 )}
               </div>
 
-              <div className={`${chatPanelLayoutClassNames.composer} border-t border-neutral-200 bg-[var(--panel-muted)]/80 p-3 lg:p-4`}>
+              <div className={`${chatPanelLayoutClassNames.composer} border-t border-neutral-200/80 bg-[linear-gradient(180deg,rgba(247,249,248,0.9),rgba(255,255,255,0.96))] p-3 lg:p-4`}>
                 <div className="grid gap-3">
                   <input
                     ref={fileInputRef}
@@ -2598,6 +3584,7 @@ export function App() {
                     </div>
                   ) : null}
                   <textarea
+                    ref={composerTextareaRef}
                     className={`min-h-[92px] w-full resize-none rounded-[1rem] border px-4 py-3 text-sm shadow-[inset_0_1px_2px_rgba(15,23,42,0.04)] outline-none placeholder:text-neutral-400 ${
                       isActiveAgentStopped
                         ? "border-neutral-200 bg-neutral-100 text-neutral-400"
@@ -2612,10 +3599,46 @@ export function App() {
                         : `Message @${activeAgent?.name ?? "Agent"}`
                     }
                     value={composerValue}
-                    onChange={(event) => setComposerValue(event.target.value)}
+                    onChange={(event) => handleComposerChange(event.target.value, event.target.selectionStart)}
                     onKeyDown={handleComposerKeyDown}
                     onPaste={handleComposerPaste}
                   />
+                  {shellState.activeTarget.kind === "channel" && mentionState && mentionCandidates.length > 0 ? (
+                    <div className="rounded-[1.05rem] bg-white/92 p-2 ring-1 ring-neutral-200/80 shadow-[0_20px_50px_rgba(15,23,42,0.10)] backdrop-blur-sm">
+                      <div className="mb-2 flex items-center gap-2 px-2 pt-1">
+                        <AtSign className="size-4 text-[var(--accent)]" />
+                        <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-500">Mention someone</p>
+                      </div>
+                      <div className="grid gap-1">
+                        {mentionCandidates.map((participant, index) => (
+                          <button
+                            key={`${participant.participantType}:${participant.participantId}`}
+                            className={`flex items-center justify-between gap-3 rounded-[0.9rem] px-3 py-2.5 text-left transition ${
+                              mentionState.selectedIndex === index
+                                ? "bg-[var(--accent-soft)] text-[var(--accent-strong)]"
+                                : "text-neutral-700 hover:bg-neutral-50"
+                            }`}
+                            onClick={() => applyMentionSelection(participant)}
+                            type="button"
+                          >
+                            <div className="min-w-0">
+                              <p className="truncate text-sm font-medium">{participant.displayName}</p>
+                              <p className="mt-0.5 truncate text-xs text-neutral-500">
+                                {participant.participantType === "agent"
+                                  ? participant.agentStatus === "running"
+                                    ? "Agent online"
+                                    : participant.agentStatus ?? "Agent"
+                                  : participant.email ?? participant.role ?? "Member"}
+                              </p>
+                            </div>
+                            <span className="rounded-full border border-neutral-200 px-2 py-1 font-mono text-[10px] uppercase tracking-[0.16em] text-neutral-500">
+                              {participant.participantType}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <button
                       className={`panel-control flex size-10 items-center justify-center rounded-xl ${
@@ -2630,15 +3653,306 @@ export function App() {
                     <p className="font-mono text-[10px] text-neutral-400">
                       {isActiveAgentStopped
                         ? "Agent is stopped. Start it to resume sending work."
-                        : "Enter to send, Shift+Enter for newline, use + or paste for local resources"}
+                        : shellState.activeTarget.kind === "channel"
+                          ? "Enter to send, Shift+Enter for newline, type @ to mention agents or members"
+                          : "Enter to send, Shift+Enter for newline, use + or paste for local resources"}
                     </p>
                   </div>
                 </div>
               </div>
+              {shellState.activeTarget.kind === "channel" && (isChannelSettingsOpen || isChannelMembersOpen) ? (
+                <aside className="pointer-events-none absolute inset-y-[5.75rem] right-4 z-20 w-[min(380px,calc(100%-2rem))]">
+                  <div className="pointer-events-auto h-full overflow-hidden rounded-[1.5rem] bg-[rgba(255,255,255,0.96)] ring-1 ring-neutral-200/80 shadow-[0_24px_70px_rgba(15,23,42,0.14)] backdrop-blur-xl">
+                    {isChannelSettingsOpen ? (
+                      <div className="flex h-full flex-col">
+                        <div className="flex items-center justify-between border-b border-neutral-200/80 px-5 py-4">
+                          <div>
+                            <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-500">Channel</p>
+                            <h2 className="mt-1 text-xl font-semibold tracking-[-0.03em] text-neutral-950">Edit details</h2>
+                          </div>
+                          <button className="panel-control flex size-10 items-center justify-center rounded-xl text-neutral-700" onClick={() => setIsChannelSettingsOpen(false)} type="button">
+                            <X className="size-4" />
+                          </button>
+                        </div>
+                        <div className="grid gap-4 overflow-y-auto px-5 py-5">
+                          <label className="grid gap-2">
+                            <span className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-500">Name</span>
+                            <Input
+                              disabled={activeChannel?.id === "chn_general"}
+                              value={channelSettingsDraft.name}
+                              onChange={(event) => setChannelSettingsDraft((current) => ({ ...current, name: event.target.value }))}
+                            />
+                            {activeChannel?.id === "chn_general" ? <p className="text-xs text-neutral-500">The #all channel keeps its canonical name.</p> : null}
+                          </label>
+                          <label className="grid gap-2">
+                            <span className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-500">Description</span>
+                            <textarea
+                              className="min-h-[140px] w-full resize-none rounded-[1rem] bg-white/82 px-4 py-3 text-sm text-neutral-950 outline-none ring-1 ring-neutral-300/90 focus:ring-[color:color-mix(in_srgb,var(--accent)_40%,white)] focus-visible:ring-4 focus-visible:ring-[var(--accent-soft)]"
+                              value={channelSettingsDraft.description}
+                              onChange={(event) => setChannelSettingsDraft((current) => ({ ...current, description: event.target.value }))}
+                            />
+                          </label>
+                        </div>
+                        <div className="mt-auto flex items-center justify-between border-t border-neutral-200/80 px-5 py-4">
+                          <p className="text-sm text-neutral-500">{channelSettingsNotice ?? "Shape the context people and agents see before they speak."}</p>
+                          <Button onClick={() => void handleSaveChannelSettings()} size="sm" type="button" className="shadow-none">Save</Button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex h-full flex-col">
+                        <div className="flex items-center justify-between border-b border-neutral-200/80 px-5 py-4">
+                          <div>
+                            <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-500">Members</p>
+                            <h2 className="mt-1 text-xl font-semibold tracking-[-0.03em] text-neutral-950">{activeChannelParticipantCount} in channel</h2>
+                          </div>
+                          <button className="panel-control flex size-10 items-center justify-center rounded-xl text-neutral-700" onClick={() => setIsChannelMembersOpen(false)} type="button">
+                            <X className="size-4" />
+                          </button>
+                        </div>
+                        <div className="grid gap-3 overflow-y-auto px-4 py-4">
+                          {channelParticipants.map((participant) => (
+                            <div key={`${participant.participantType}:${participant.participantId}`} className="rounded-[1rem] bg-white/78 px-4 py-3 ring-1 ring-neutral-200/80">
+                              <div className="flex items-center justify-between gap-3">
+                                <div className="min-w-0">
+                                  <p className="truncate text-sm font-semibold text-neutral-900">{participant.displayName}</p>
+                                  <p className="mt-1 truncate text-xs text-neutral-500">
+                                    {participant.participantType === "agent"
+                                      ? participant.agentStatus === "running"
+                                        ? "Agent online"
+                                        : participant.agentStatus ?? "Agent"
+                                      : participant.email ?? participant.role ?? "Member"}
+                                  </p>
+                                </div>
+                                <Badge>{participant.participantType}</Badge>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </aside>
+              ) : null}
             </div>
           ) : shellState.primaryView === "kanban" ? (
             <div className="flex h-full flex-col">
-              <div className="border-b border-neutral-200 px-5 py-5">
+              {selectedIssueForPage ? (
+                <div className="min-h-0 flex flex-1 flex-col overflow-hidden bg-[linear-gradient(180deg,rgba(250,251,250,0.92),rgba(244,247,245,0.9))]">
+                  <div className="border-b border-neutral-200/80 px-5 py-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <button className="inline-flex items-center gap-2 text-sm font-medium text-neutral-500 transition hover:text-neutral-900" onClick={handleCloseIssueWorkspace} type="button">
+                          <ArrowLeft className="size-4" />
+                          Back to board
+                        </button>
+                        <div className="mt-3 flex flex-wrap items-center gap-2">
+                          <h1 className="text-[30px] font-semibold tracking-[-0.05em] text-neutral-950">{issueEditorPreview.title || selectedIssueForPage.title}</h1>
+                          <StatusPill tone={getIssueStatusTone(selectedIssueForPage.status)}>{formatIssueStatus(selectedIssueForPage.status)}</StatusPill>
+                        </div>
+                        <p className="mt-2 max-w-3xl text-sm leading-6 text-neutral-500">
+                          Issue detail, editing, and execution activity for this task.
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          className="border-rose-200 text-rose-700 hover:bg-rose-50 hover:text-rose-800"
+                          onClick={() => void handleDeleteIssue(selectedIssueForPage.id)}
+                          size="sm"
+                          type="button"
+                          variant="ghost"
+                        >
+                          <Trash2 className="size-4" />
+                          Delete
+                        </Button>
+                        {issueEditorNotice ? <span className="text-sm text-neutral-500">{issueEditorNotice}</span> : null}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="grid min-h-0 flex-1 gap-0 xl:grid-cols-[minmax(0,1.4fr)_360px]">
+                    <div className="min-h-0 overflow-y-auto px-5 py-5 xl:border-r xl:border-neutral-200/80">
+                      <div className="mx-auto max-w-4xl space-y-6">
+                        <section className="space-y-4">
+                          <div className="rounded-[1.5rem] bg-white/86 px-5 py-5 ring-1 ring-neutral-200/80">
+                            <div className="flex items-center justify-between gap-3">
+                              <div>
+                                <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-500">Issue Brief</p>
+                                <p className="mt-1 text-sm text-neutral-500">Use the first line as the title. The rest supports markdown-style notes and review context.</p>
+                              </div>
+                              <span className="rounded-full bg-neutral-100 px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.16em] text-neutral-500">markdown</span>
+                            </div>
+                            <textarea
+                              className="mt-4 min-h-[260px] w-full resize-y border-0 bg-transparent px-0 py-0 text-[17px] leading-8 text-neutral-900 outline-none placeholder:text-neutral-300"
+                              placeholder={"Issue title\n\nDescribe the work, acceptance criteria, links, reviewer notes, or constraints..."}
+                              value={issueEditorBrief}
+                              onChange={(event) => setIssueEditorBrief(event.target.value)}
+                            />
+                          </div>
+                        </section>
+
+                        <section className="space-y-3 border-t border-neutral-200/80 pt-6">
+                          <div>
+                            <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-500">Activity</p>
+                            <p className="mt-1 text-sm text-neutral-500">All edits, status transitions, and agent execution updates are recorded here.</p>
+                          </div>
+                          <div className="grid gap-3">
+                            {selectedIssueTimeline.length === 0 ? (
+                              <div className="rounded-[1.2rem] bg-white/72 px-4 py-4 text-sm text-neutral-500 ring-1 ring-neutral-200/75">No activity yet.</div>
+                            ) : (
+                              selectedIssueTimeline.map((item, index) =>
+                                item.kind === "run" ? (
+                                  <div key={`${item.log.id}-${index}`} className="rounded-[1.25rem] bg-white/82 px-4 py-4 ring-1 ring-neutral-200/75">
+                                    <div className="flex items-start justify-between gap-4">
+                                      <div>
+                                        <p className="text-sm font-medium text-neutral-900">Execution history</p>
+                                        <p className="mt-1 text-xs text-neutral-500">Session {item.log.sessionId} · {item.log.kind.replaceAll("_", " ")}</p>
+                                      </div>
+                                      <span className="shrink-0 font-mono text-[11px] text-neutral-400" title={createTimestampLabels(item.log.createdAt).precise}>
+                                        {createTimestampLabels(item.log.createdAt).compact}
+                                      </span>
+                                    </div>
+                                    <div className="mt-3 grid gap-3 lg:grid-cols-2">
+                                      <div className="rounded-[1rem] bg-neutral-50 px-3 py-3">
+                                        <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-neutral-400">Prompt</p>
+                                        <p className="mt-2 max-h-44 overflow-y-auto whitespace-pre-wrap break-words text-sm leading-6 text-neutral-700">{item.log.prompt}</p>
+                                      </div>
+                                      <div className="rounded-[1rem] bg-neutral-50 px-3 py-3">
+                                        <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-neutral-400">Response</p>
+                                        <p className="mt-2 max-h-44 overflow-y-auto whitespace-pre-wrap break-words text-sm leading-6 text-neutral-700">{item.log.response || "No response captured."}</p>
+                                      </div>
+                                    </div>
+                                  </div>
+                                ) : item.activity.kind === "commented" ? (
+                                  <div key={item.activity.id} className="rounded-[1.25rem] bg-white/84 ring-1 ring-neutral-200/75">
+                                    <div className="flex items-center justify-between gap-3 px-4 py-3">
+                                      <div className="flex items-center gap-3">
+                                        <div className="flex size-10 items-center justify-center rounded-full bg-neutral-100 text-sm font-semibold text-neutral-600">
+                                          {getAvatarInitials(resolveIssueActivityActorName(item.activity, workspace))}
+                                        </div>
+                                        <div>
+                                          <p className="text-sm font-semibold text-neutral-900">{resolveIssueActivityActorName(item.activity, workspace)}</p>
+                                          <p className="mt-0.5 text-xs text-neutral-500">comment</p>
+                                        </div>
+                                      </div>
+                                      <span className="shrink-0 font-mono text-[11px] text-neutral-400" title={createTimestampLabels(item.activity.createdAt).precise}>
+                                        {createTimestampLabels(item.activity.createdAt).compact}
+                                      </span>
+                                    </div>
+                                    <div className="border-t border-neutral-200/70 px-4 py-4">
+                                      <p className="whitespace-pre-wrap break-words text-sm leading-7 text-neutral-700">{item.activity.message}</p>
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <div key={item.activity.id} className="flex items-start justify-between gap-4 px-1 py-1">
+                                    <div className="min-w-0 text-sm text-neutral-700">
+                                      <p className="font-medium text-neutral-900">{formatIssueActivity(item.activity, workspace)}</p>
+                                    </div>
+                                    <span className="shrink-0 font-mono text-[11px] text-neutral-400" title={createTimestampLabels(item.activity.createdAt).precise}>
+                                      {createTimestampLabels(item.activity.createdAt).compact}
+                                    </span>
+                                  </div>
+                                )
+                              )
+                            )}
+                            <div className="rounded-[1.25rem] bg-white/86 px-4 py-4 ring-1 ring-neutral-200/75">
+                              <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-neutral-400">Leave a comment</p>
+                              <textarea
+                                className="mt-3 min-h-[110px] w-full resize-y border-0 bg-transparent px-0 py-0 text-sm leading-7 text-neutral-900 outline-none placeholder:text-neutral-400"
+                                placeholder="Share review notes, feedback, or ask the agent to continue from here..."
+                                value={issueCommentDraft}
+                                onKeyDown={(event) => {
+                                  if (event.key === "Enter" && !event.shiftKey) {
+                                    event.preventDefault();
+                                    if (issueCommentDraft.trim()) {
+                                      void handleCreateIssueComment();
+                                    }
+                                  }
+                                }}
+                                onChange={(event) => setIssueCommentDraft(event.target.value)}
+                              />
+                              <div className="mt-3 flex justify-end">
+                                <Button disabled={!issueCommentDraft.trim()} onClick={() => void handleCreateIssueComment()} size="sm" type="button" variant="ghost">
+                                  Comment
+                                </Button>
+                              </div>
+                            </div>
+                          </div>
+                        </section>
+                      </div>
+                    </div>
+
+                    <aside className="min-h-0 overflow-y-auto px-5 py-5">
+                      <div className="space-y-4">
+                        <div className="rounded-[1.35rem] bg-white/78 px-4 py-4 ring-1 ring-neutral-200/80">
+                          <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-500">Properties</p>
+                          <p className="mt-2 text-sm leading-6 text-neutral-500">When agent work is ready, move from `In Review` to `Done` or back to `Todo` after leaving feedback below.</p>
+                          <div className="mt-4 grid gap-4">
+                            <label className="grid gap-2">
+                              <span className="text-sm font-medium text-neutral-700">Status</span>
+                              <select className="h-11 rounded-xl bg-white px-3 text-sm text-neutral-900 outline-none ring-1 ring-neutral-200" value={issueEditorDraft.status} onChange={(event) => setIssueEditorDraft((current) => ({ ...current, status: event.target.value as IssueDTO["status"] }))}>
+                                <option value="backlog">Backlog</option>
+                                <option value="todo">Todo</option>
+                                <option value="in_progress">In Progress</option>
+                                <option value="in_review">In Review</option>
+                                <option value="done">Done</option>
+                              </select>
+                            </label>
+                            <label className="grid gap-2">
+                              <span className="text-sm font-medium text-neutral-700">Priority</span>
+                              <select className="h-11 rounded-xl bg-white px-3 text-sm text-neutral-900 outline-none ring-1 ring-neutral-200" value={issueEditorDraft.priority} onChange={(event) => setIssueEditorDraft((current) => ({ ...current, priority: event.target.value as IssueDTO["priority"] }))}>
+                                <option value="low">Low</option>
+                                <option value="medium">Medium</option>
+                                <option value="high">High</option>
+                              </select>
+                            </label>
+                            <label className="grid gap-2">
+                              <span className="text-sm font-medium text-neutral-700">Assignee</span>
+                              <select className="h-11 rounded-xl bg-white px-3 text-sm text-neutral-900 outline-none ring-1 ring-neutral-200" value={issueEditorDraft.assigneeId ?? ""} onChange={(event) => setIssueEditorDraft((current) => ({ ...current, assigneeId: event.target.value || null }))}>
+                                <option value="">Unassigned</option>
+                                {(workspace?.agents ?? []).map((agent) => (
+                                  <option key={agent.id} value={agent.id}>{agent.name}</option>
+                                ))}
+                              </select>
+                            </label>
+                            <label className="grid gap-2">
+                              <span className="text-sm font-medium text-neutral-700">Due Date</span>
+                              <Input type="date" value={issueEditorDraft.dueDate} onChange={(event) => setIssueEditorDraft((current) => ({ ...current, dueDate: event.target.value }))} />
+                            </label>
+                          </div>
+                        </div>
+
+                        <div className="rounded-[1.35rem] bg-white/78 px-4 py-4 ring-1 ring-neutral-200/80">
+                          <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-500">Details</p>
+                          <div className="mt-4 grid gap-4">
+                            <DetailRow label="Assignee" value={selectedAgentForIssuePage?.name ?? "Unassigned"} />
+                            <DetailRow label="Created" value={formatTimestamp(selectedIssueForPage.createdAt)} />
+                            <DetailRow label="Updated" value={formatTimestamp(selectedIssueForPage.updatedAt)} />
+                            <DetailRow label="Source" value={selectedIssueForPage.sourceChannelId ? "Channel task" : "Global board issue"} />
+                          </div>
+                        </div>
+
+                        <div className="rounded-[1.35rem] bg-white/78 px-4 py-4 ring-1 ring-neutral-200/80">
+                          <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-500">Source Messages</p>
+                          <div className="mt-4 grid gap-2">
+                            {selectedIssuePageSourceMessages.length === 0 ? (
+                              <p className="text-sm text-neutral-500">No source messages linked.</p>
+                            ) : (
+                              selectedIssuePageSourceMessages.slice(-4).reverse().map((message) => (
+                                <div key={message.id} className="rounded-[1rem] bg-white px-3 py-3 ring-1 ring-neutral-200/75">
+                                  <p className="text-xs font-medium text-neutral-500">{displayMessageSenderName(message)}</p>
+                                  <p className="mt-2 line-clamp-4 text-sm leading-6 text-neutral-700">{message.content || "Attachment only update"}</p>
+                                </div>
+                              ))
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </aside>
+                  </div>
+                </div>
+              ) : (
+              <>
+              <div className="border-b border-neutral-200/80 px-5 py-5">
                 <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                   <div>
                     <div className="flex items-center gap-2">
@@ -2650,20 +3964,20 @@ export function App() {
                     </p>
                   </div>
                   <div className="flex items-center gap-2">
-                    <Button onClick={() => handleOpenIssueCreateModal("backlog")} size="sm" type="button">
+                    <Button onClick={() => handleOpenIssueCreateModal("backlog")} size="sm" type="button" className="shadow-none">
                       <Plus className="size-4" />
                       Add Issue
                     </Button>
                   </div>
                 </div>
-                <div className="mt-4 flex flex-col gap-3 rounded-[1.15rem] border border-neutral-200 bg-[linear-gradient(180deg,rgba(248,250,252,0.96)_0%,rgba(255,255,255,1)_100%)] p-3 lg:flex-row lg:items-center lg:justify-between">
+                <div className="mt-4 flex flex-col gap-3 rounded-[1.15rem] bg-[linear-gradient(180deg,rgba(248,250,252,0.86)_0%,rgba(255,255,255,0.96)_100%)] p-3 ring-1 ring-neutral-200/80 lg:flex-row lg:items-center lg:justify-between">
                   <div className="flex items-center gap-2 text-neutral-500">
                     <SlidersHorizontal className="size-4" />
                     <span className="font-mono text-[11px] font-semibold uppercase tracking-[0.16em]">Board Filters</span>
                   </div>
                   <div className="grid gap-3 sm:grid-cols-2 lg:min-w-[480px]">
                     <select
-                      className="h-10 rounded-xl border border-neutral-300 bg-white px-3 text-sm text-neutral-900 outline-none focus:border-[var(--accent)]"
+                      className="h-10 rounded-xl bg-white/82 px-3 text-sm text-neutral-900 outline-none ring-1 ring-neutral-300/90 focus:ring-[color:color-mix(in_srgb,var(--accent)_40%,white)]"
                       value={kanbanFilters.assigneeId}
                       onChange={(event) =>
                         setKanbanFilters((current) => ({
@@ -2680,7 +3994,7 @@ export function App() {
                       ))}
                     </select>
                     <select
-                      className="h-10 rounded-xl border border-neutral-300 bg-white px-3 text-sm text-neutral-900 outline-none focus:border-[var(--accent)]"
+                      className="h-10 rounded-xl bg-white/82 px-3 text-sm text-neutral-900 outline-none ring-1 ring-neutral-300/90 focus:ring-[color:color-mix(in_srgb,var(--accent)_40%,white)]"
                       value={kanbanFilters.priority}
                       onChange={(event) =>
                         setKanbanFilters((current) => ({
@@ -2700,23 +4014,28 @@ export function App() {
 
               <div className="min-h-0 flex-1 overflow-x-auto overflow-y-hidden p-4 lg:p-5">
                 <div className="grid h-full min-w-[1500px] grid-cols-5 gap-4">
-                  {[
+                  {([
                     { id: "backlog", label: "Backlog", tone: "neutral" as const, helper: "Ready for product grooming" },
                     { id: "todo", label: "Todo", tone: "neutral" as const, helper: "Ready for iteration planning" },
                     { id: "in_progress", label: "In Progress", tone: "warning" as const, helper: "Active development only" },
                     { id: "in_review", label: "In Review", tone: "warning" as const, helper: "Review, test, and acceptance" },
                     { id: "done", label: "Done", tone: "success" as const, helper: "Merged, deployed, accepted" }
-                  ].map((lane) => {
+                  ] as Array<{
+                    id: IssueDTO["status"];
+                    label: string;
+                    tone: "neutral" | "warning" | "success";
+                    helper: string;
+                  }>).map((lane) => {
                     const laneIssues = filteredKanbanIssues.filter((issue) => issue.status === lane.id);
                     const isDropActive = kanbanDropLane === lane.id;
 
                     return (
                       <section
                         key={lane.id}
-                        className={`flex min-h-0 flex-col rounded-[1.35rem] border p-3 shadow-[0_16px_34px_rgba(15,23,42,0.05)] transition ${
+                        className={`flex min-h-0 flex-col rounded-[1.35rem] p-3 ring-1 shadow-[0_14px_28px_rgba(15,23,42,0.04)] transition ${
                           isDropActive
-                            ? "border-[var(--accent)] bg-[linear-gradient(180deg,rgba(79,70,229,0.08)_0%,rgba(255,255,255,0.98)_100%)]"
-                            : "border-neutral-200 bg-[var(--panel-elevated)]"
+                            ? "bg-[linear-gradient(180deg,rgba(79,70,229,0.08)_0%,rgba(255,255,255,0.98)_100%)] ring-[color:color-mix(in_srgb,var(--accent)_30%,white)]"
+                            : "bg-[var(--panel-elevated)] ring-neutral-200/80"
                         }`}
                         onDragOver={(event) => {
                           event.preventDefault();
@@ -2740,7 +4059,7 @@ export function App() {
                           void handleMoveIssue(issueId, lane.id);
                         }}
                       >
-                        <div className="mb-3 rounded-[1rem] border border-neutral-200 bg-white px-3 py-3">
+                        <div className="mb-3 rounded-[1rem] bg-white/74 px-3 py-3 ring-1 ring-neutral-200/70">
                           <div className="flex items-center justify-between gap-3">
                             <div className="flex items-center gap-3">
                               <span
@@ -2749,9 +4068,7 @@ export function App() {
                                     ? "bg-emerald-100 text-emerald-700"
                                     : lane.tone === "warning"
                                       ? "bg-amber-100 text-amber-700"
-                                      : lane.tone === "danger"
-                                        ? "bg-rose-100 text-rose-700"
-                                        : "bg-slate-100 text-slate-700"
+                                      : "bg-slate-100 text-slate-700"
                                 }`}
                               >
                                 {laneIssues.length}
@@ -2773,7 +4090,7 @@ export function App() {
 
                         <div className="min-h-0 flex-1 overflow-y-auto">
                           {laneIssues.length === 0 ? (
-                            <div className="flex h-full min-h-[240px] items-center justify-center rounded-[1.1rem] border border-dashed border-neutral-200 bg-white/80 p-6 text-center">
+                            <div className="flex h-full min-h-[240px] items-center justify-center rounded-[1.1rem] bg-white/68 p-6 text-center ring-1 ring-dashed ring-neutral-200/75">
                               <div>
                                 <p className="text-sm font-medium text-neutral-900">No issues in {lane.label}</p>
                                 <p className="mt-2 text-xs leading-5 text-neutral-500">
@@ -2786,13 +4103,13 @@ export function App() {
                               {laneIssues.map((issue) => (
                                 <article
                                   key={issue.id}
-                                  className={`rounded-[1.1rem] border border-neutral-200 bg-white p-4 shadow-[0_10px_24px_rgba(15,23,42,0.05)] transition ${
+                                  className={`rounded-[1.1rem] bg-white/84 p-4 ring-1 ring-neutral-200/80 shadow-[0_10px_24px_rgba(15,23,42,0.04)] transition ${
                                     draggingIssueId === issue.id
                                       ? "scale-[0.98] rotate-[1deg] opacity-60"
-                                      : "cursor-grab hover:-translate-y-0.5 hover:border-neutral-300 hover:shadow-[0_16px_30px_rgba(15,23,42,0.08)]"
+                                      : "cursor-grab hover:-translate-y-0.5 hover:bg-white hover:ring-neutral-300 hover:shadow-[0_16px_30px_rgba(15,23,42,0.06)]"
                                   }`}
                                   draggable
-                                  onClick={() => handleOpenDetailPanel("issue", issue.id)}
+                                  onClick={() => handleOpenIssueWorkspace(issue.id)}
                                   onDragStart={(event) => {
                                     event.dataTransfer.effectAllowed = "move";
                                     event.dataTransfer.setData("text/plain", issue.id);
@@ -2838,10 +4155,23 @@ export function App() {
                                         ? workspace?.agents.find((agent) => agent.id === issue.assigneeId)?.name ?? "Assigned"
                                         : "Unassigned"}
                                     </span>
-                                    <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
-                                      <CalendarDays className="size-3.5" />
-                                      {issue.dueDate ? formatTimestamp(issue.dueDate) : "No due date"}
-                                    </span>
+                                    <div className="flex items-center gap-3">
+                                      <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
+                                        <CalendarDays className="size-3.5" />
+                                        {issue.dueDate ? formatTimestamp(issue.dueDate) : "No due date"}
+                                      </span>
+                                      <button
+                                        className="inline-flex items-center gap-1 rounded-full bg-rose-50 px-2.5 py-1 text-[11px] font-medium text-rose-700 transition hover:bg-rose-100"
+                                        onClick={(event) => {
+                                          event.stopPropagation();
+                                          void handleDeleteIssue(issue.id);
+                                        }}
+                                        type="button"
+                                      >
+                                        <Trash2 className="size-3" />
+                                        Delete
+                                      </button>
+                                    </div>
                                   </div>
                                 </article>
                               ))}
@@ -2853,13 +4183,15 @@ export function App() {
                   })}
                 </div>
               </div>
+              </>
+              )}
             </div>
           ) : shellState.primaryView === "agents" ? (
             <div className="flex h-full flex-col">
               <div className={agentWorkspaceLayoutClassNames.viewport}>
                 {selectedAgentWorkspace ? (
                   <div className={agentWorkspaceLayoutClassNames.content}>
-                    <div className="overflow-hidden rounded-[1.25rem] bg-white">
+                    <div className="shrink-0 overflow-hidden rounded-[1.25rem] bg-white">
                       <div className="flex flex-col gap-2 border-b border-neutral-200 px-5 py-3 lg:flex-row lg:items-start lg:justify-between">
                         <div className="flex items-center gap-3">
                           <div className={`${getActorAvatarClass("agent")} size-10 text-emerald-700`}>
@@ -2870,6 +4202,11 @@ export function App() {
                             <StatusPill tone={selectedAgentWorkspace.status === "running" ? "success" : "warning"}>
                               {selectedAgentWorkspace.status}
                             </StatusPill>
+                            <span className="font-mono text-[11px] uppercase tracking-[0.16em] text-neutral-400">
+                              {selectedAgentWorkspace.status === "stopped"
+                                ? "Stopped"
+                                : (selectedAgentWorkspaceActivityBadge?.presenceLabel ?? "Idle")}
+                            </span>
                             <span className="font-mono text-[11px] uppercase tracking-[0.16em] text-neutral-400">
                               {selectedAgentWorkspace.implementation} / {selectedAgentWorkspace.model} / {selectedAgentWorkspace.reasoningEffort}
                             </span>
@@ -2920,6 +4257,18 @@ export function App() {
                           onClick={() => setAgentWorkspace((current) => setAgentWorkspaceMode(current, "issues"))}
                         />
                         <AgentModeTab
+                          active={agentWorkspace.mode === "logs"}
+                          icon={SlidersHorizontal}
+                          label="Logs"
+                          onClick={() => setAgentWorkspace((current) => setAgentWorkspaceMode(current, "logs"))}
+                        />
+                        <AgentModeTab
+                          active={agentWorkspace.mode === "memory"}
+                          icon={Files}
+                          label="Memory"
+                          onClick={() => setAgentWorkspace((current) => setAgentWorkspaceMode(current, "memory"))}
+                        />
+                        <AgentModeTab
                           active={agentWorkspace.mode === "profile"}
                           icon={FileText}
                           label="Profile"
@@ -2929,40 +4278,34 @@ export function App() {
                     </div>
 
                     {agentWorkspace.mode === "profile" ? (
-                      <>
-                        <DetailCard accent="agent">
+                      <div className="min-h-0 flex flex-1 flex-col overflow-hidden rounded-[1.3rem] bg-[linear-gradient(180deg,rgba(255,255,255,0.96),rgba(246,248,247,0.96))] ring-1 ring-neutral-200/80 shadow-[0_12px_28px_rgba(15,23,42,0.05)]">
+                        <div className="border-b border-neutral-200/80 px-5 py-4">
                           <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-500">Prompt Constraint</p>
-                          <p className="mt-3 text-sm leading-7 text-neutral-700">{selectedAgentWorkspace.description}</p>
-                        </DetailCard>
-                        <div className="grid gap-4 lg:grid-cols-3">
-                          <DetailCard>
+                          <p className="mt-3 max-w-4xl text-sm leading-7 text-neutral-700">{selectedAgentWorkspace.description}</p>
+                        </div>
+                        <div className="grid gap-0 lg:grid-cols-[1.1fr_1fr_0.95fr]">
+                          <div className="grid gap-4 px-5 py-4 lg:border-r lg:border-neutral-200/70">
                             <DetailRow label="Runtime" value={selectedAgentWorkspaceRuntime?.name ?? selectedAgentWorkspace.runtimeId} />
                             <DetailRow label="Messages" value={String(selectedAgentWorkspaceMessages.length)} />
                             <DetailRow label="Assigned Issues" value={String(selectedAgentWorkspaceIssues.length)} />
-                          </DetailCard>
-                          <DetailCard>
+                          </div>
+                          <div className="grid gap-4 px-5 py-4 lg:border-r lg:border-neutral-200/70">
                             <DetailRow label="Implementation" value={selectedAgentWorkspace.implementation} />
                             <DetailRow label="Model" value={selectedAgentWorkspace.model} />
                             <DetailRow label="Reasoning" value={selectedAgentWorkspace.reasoningEffort} />
-                          </DetailCard>
-                          <DetailCard>
-                            <div className="flex flex-col gap-2">
-                              <Button
-                                onClick={() => handleSelectConversation("agent", selectedAgentWorkspace.id)}
-                                type="button"
-                                variant="secondary"
-                              >
-                                <MessageSquareText className="size-4" />
-                                Open Chat Thread
-                              </Button>
-                              <Button onClick={() => handleOpenAgentCreateModal(selectedAgentWorkspace.runtimeId)} type="button" variant="ghost">
-                                <Plus className="size-4" />
-                                Create Sibling Agent
-                              </Button>
-                            </div>
-                          </DetailCard>
+                          </div>
+                          <div className="flex flex-col gap-2 px-5 py-4">
+                            <Button onClick={() => handleOpenAgentWorkspace(selectedAgentWorkspace.id)} type="button" variant="secondary">
+                              <MessageSquareText className="size-4" />
+                              Open Chat Thread
+                            </Button>
+                            <Button onClick={() => handleOpenAgentCreateModal(selectedAgentWorkspace.runtimeId)} type="button" variant="ghost">
+                              <Plus className="size-4" />
+                              Create Sibling Agent
+                            </Button>
+                          </div>
                         </div>
-                        <DetailCard accent="agent">
+                        <div className="min-h-0 flex-1 overflow-y-auto border-t border-neutral-200/80 px-5 py-4">
                           <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-500">Recent Activity</p>
                           <div className="mt-3 grid gap-2">
                             {selectedAgentWorkspaceMessages.length === 0 ? (
@@ -2971,7 +4314,7 @@ export function App() {
                               selectedAgentWorkspaceMessages.slice(-4).reverse().map((message) => (
                                 <button
                                   key={message.id}
-                                  className="rounded-xl border border-neutral-200 bg-white px-3 py-3 text-left transition hover:border-neutral-300 hover:bg-neutral-50"
+                                  className="rounded-[0.95rem] bg-white/75 px-3 py-3 text-left ring-1 ring-neutral-200/75 transition hover:bg-white hover:ring-neutral-300"
                                   onClick={() => {
                                     handleSelectConversation("agent", selectedAgentWorkspace.id);
                                     setSelectedMessageId(message.id);
@@ -2992,11 +4335,11 @@ export function App() {
                               ))
                             )}
                           </div>
-                        </DetailCard>
-                      </>
+                        </div>
+                      </div>
                     ) : agentWorkspace.mode === "issues" ? (
-                      <div className="rounded-[1.25rem] border border-neutral-200 bg-[var(--panel-elevated)] p-3 shadow-[0_10px_24px_rgba(15,23,42,0.05)]">
-                        <div className="mb-3 flex items-center justify-between gap-3 px-1">
+                      <div className="min-h-0 flex flex-1 flex-col gap-3 overflow-hidden">
+                        <div className="flex items-center justify-between gap-3 px-1">
                           <div>
                             <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-500">Assigned Issues</p>
                             <p className="mt-1 text-xs text-neutral-400">{selectedAgentWorkspaceIssues.length} issues assigned</p>
@@ -3006,14 +4349,15 @@ export function App() {
                             Add Issue
                           </Button>
                         </div>
-                        <div className="grid gap-2">
+                        <div className="min-h-0 flex-1 overflow-y-auto">
+                          <div className="grid gap-2">
                           {selectedAgentWorkspaceIssues.length === 0 ? (
                             <EmptyState>No issues are assigned to this agent yet.</EmptyState>
                           ) : (
                             selectedAgentWorkspaceIssues.map((issue) => (
                               <button
                                 key={issue.id}
-                                className="rounded-[1rem] border border-neutral-200 bg-white px-4 py-4 text-left transition hover:border-neutral-300 hover:bg-neutral-50"
+                                className="rounded-[1rem] bg-white/82 px-4 py-4 text-left ring-1 ring-neutral-200/80 transition hover:bg-white hover:ring-neutral-300"
                                 onClick={() => handleOpenDetailPanel("issue", issue.id)}
                                 type="button"
                               >
@@ -3034,6 +4378,135 @@ export function App() {
                               </button>
                             ))
                           )}
+                          </div>
+                        </div>
+                      </div>
+                    ) : agentWorkspace.mode === "logs" ? (
+                      <div className="min-h-0 flex flex-1 flex-col gap-3 overflow-hidden">
+                        <div className="flex items-center justify-between gap-3 px-1">
+                          <div>
+                            <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-500">Model Exchange Logs</p>
+                            <p className="mt-1 text-xs text-neutral-400">{selectedAgentWorkspaceLogs.length} recorded runs</p>
+                          </div>
+                          <span className="rounded-full bg-white/75 px-2.5 py-1 font-mono text-[11px] text-neutral-500 ring-1 ring-neutral-200/80">
+                            Loki-style details
+                          </span>
+                        </div>
+                        <div className="min-h-0 flex-1 overflow-y-auto rounded-[1rem] bg-white/82 ring-1 ring-neutral-200/80">
+                          {selectedAgentWorkspaceLogs.length === 0 ? (
+                            <EmptyState>No logs captured for this agent yet.</EmptyState>
+                          ) : (
+                            <div className="divide-y divide-neutral-200">
+                              {selectedAgentWorkspaceLogs.map((log) => {
+                                const isExpanded = expandedAgentLogIds[log.id] ?? false;
+                                const timestamp = createTimestampLabels(log.createdAt);
+                                return (
+                                  <button
+                                    key={log.id}
+                                    className="w-full text-left transition hover:bg-neutral-50"
+                                    onClick={() =>
+                                      setExpandedAgentLogIds((current) => ({
+                                        ...current,
+                                        [log.id]: !isExpanded
+                                      }))
+                                    }
+                                    type="button"
+                                  >
+                                    <div className="flex items-start gap-3 px-4 py-3">
+                                      <div className="pt-0.5 text-neutral-400">
+                                        {isExpanded ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
+                                      </div>
+                                      <div className="min-w-0 flex-1">
+                                        <div className="flex flex-wrap items-center gap-2">
+                                          <span className="font-mono text-[11px] uppercase tracking-[0.16em] text-neutral-400" title={timestamp.precise}>
+                                            {timestamp.compact}
+                                          </span>
+                                          <StatusPill tone={log.kind === "issue" ? "warning" : "neutral"}>{log.kind === "issue" ? "issue" : "chat"}</StatusPill>
+                                          <span className="font-mono text-[11px] text-neutral-400">{log.sessionId}</span>
+                                        </div>
+                                        <p className="mt-2 line-clamp-2 text-[13px] leading-6 text-neutral-700">
+                                          {log.prompt || "(empty prompt)"}
+                                        </p>
+                                        {isExpanded ? (
+                                          <div className="mt-3 grid gap-3 rounded-[0.95rem] bg-neutral-50/90 p-3 ring-1 ring-neutral-200/75">
+                                            <div>
+                                              <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.16em] text-neutral-500">Prompt</p>
+                                              <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-words font-mono text-[12px] leading-6 text-neutral-800">
+                                                {log.prompt}
+                                              </pre>
+                                            </div>
+                                            <div>
+                                              <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.16em] text-neutral-500">Response</p>
+                                              <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-words font-mono text-[12px] leading-6 text-neutral-800">
+                                                {log.response || "(empty response)"}
+                                              </pre>
+                                            </div>
+                                          </div>
+                                        ) : null}
+                                      </div>
+                                    </div>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ) : agentWorkspace.mode === "memory" ? (
+                      <div className="min-h-0 flex-1 overflow-hidden rounded-[1.3rem] bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(245,247,246,0.96))] ring-1 ring-neutral-200/80 shadow-[0_12px_28px_rgba(15,23,42,0.05)]">
+                        <div className="grid h-full min-h-0 gap-0 lg:grid-cols-[minmax(180px,0.44fr)_minmax(0,1.56fr)]">
+                          <div className="flex min-h-0 flex-col lg:border-r lg:border-neutral-200/80">
+                            <div className="border-b border-neutral-200/80 px-4 py-3 lg:border-b-0">
+                              <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-500">Agent Workspace</p>
+                              <p className="mt-1 text-xs text-neutral-400">Persistent files synced from the daemon host.</p>
+                            </div>
+                            <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
+                              {isAgentWorkspaceFilesLoading ? (
+                                <EmptyState>Loading workspace files...</EmptyState>
+                              ) : agentWorkspaceFilesError ? (
+                                <EmptyState>{agentWorkspaceFilesError}</EmptyState>
+                              ) : agentWorkspaceFiles.length === 0 ? (
+                                <EmptyState>No workspace files have been synced yet.</EmptyState>
+                              ) : (
+                                <AgentWorkspaceTree
+                                  collapsedFolders={collapsedAgentWorkspaceFolders}
+                                  onSelectFile={setSelectedAgentWorkspaceFilePath}
+                                  onToggleFolder={(path, defaultCollapsed) =>
+                                    setCollapsedAgentWorkspaceFolders((current) => ({
+                                      ...current,
+                                      [path]: !(current[path] ?? defaultCollapsed)
+                                    }))
+                                  }
+                                  selectedFilePath={selectedAgentWorkspaceFilePath}
+                                  tree={agentWorkspaceTree}
+                                />
+                              )}
+                            </div>
+                          </div>
+                          <div className="flex min-h-0 flex-col">
+                            <div className="border-b border-neutral-200/80 px-4 py-3">
+                              <div className="flex flex-wrap items-center justify-between gap-3">
+                                <div>
+                                  <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-500">File Preview</p>
+                                  <p className="mt-1 text-xs text-neutral-400">{selectedAgentWorkspaceFile?.path ?? selectedAgentWorkspaceFilePath ?? "Select a file"}</p>
+                                </div>
+                                {selectedAgentWorkspaceFile ? (
+                                  <span className="rounded-full bg-white/75 px-2.5 py-1 font-mono text-[11px] text-neutral-500 ring-1 ring-neutral-200/80">
+                                    {createTimestampLabels(selectedAgentWorkspaceFile.updatedAt).compact}
+                                  </span>
+                                ) : null}
+                              </div>
+                            </div>
+                            <div className="min-h-0 flex-1 overflow-auto p-4">
+                              {selectedAgentWorkspaceFile ? (
+                                <pre className="whitespace-pre-wrap break-words font-mono text-[12px] leading-6 text-neutral-800">
+                                  {selectedAgentWorkspaceFile.content}
+                                </pre>
+                              ) : (
+                                <EmptyState>Select a workspace file to preview it.</EmptyState>
+                              )}
+                            </div>
+                          </div>
                         </div>
                       </div>
                     ) : (
@@ -3084,7 +4557,7 @@ export function App() {
                                         )}
                                         <div className="min-w-0 flex-1">
                                           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                                            <span className={tone === "agent" ? "font-mono text-[12.5px] font-semibold text-neutral-950" : "text-[13px] font-semibold text-neutral-900"}>
+<span className="text-[13px] font-semibold text-neutral-900">
                                               {senderDisplayName}
                                             </span>
                                             {tone === "agent" ? <StatusDot tone="success" /> : null}
@@ -3101,7 +4574,7 @@ export function App() {
                                             </div>
                                           ) : null}
                                           {message.content ? (
-                                            <p className={`mt-1.5 select-text whitespace-pre-wrap break-words leading-6 ${tone === "agent" ? "font-mono text-[12.5px] text-neutral-800" : "text-[13px] text-neutral-700"}`}>
+<p className="mt-1.5 select-text whitespace-pre-wrap break-words leading-6 text-[13px] text-neutral-700">
                                               {message.content}
                                             </p>
                                           ) : null}
@@ -3182,110 +4655,309 @@ export function App() {
             <div className="flex h-full flex-col">
               <div className="min-h-0 flex-1 overflow-y-auto p-4 lg:p-5">
                 {selectedRuntimeWorkspace ? (
-                  <div className="mx-auto max-w-6xl space-y-4">
-                    <div className="rounded-[1.25rem] border border-neutral-200 bg-white p-4">
-                      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <Monitor className="size-5 text-neutral-700" />
-                            <h2 className="text-[26px] font-semibold tracking-[-0.04em] text-neutral-950">{selectedRuntimeWorkspace.name}</h2>
+                  <div className="mx-auto flex max-w-6xl flex-col gap-4">
+                    <section className="overflow-hidden rounded-[1.75rem] bg-white/92 ring-1 ring-neutral-200/80">
+                      <div className="border-b border-neutral-200/80 px-5 py-4">
+                        <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-3">
+                              <div className="flex size-11 items-center justify-center rounded-2xl bg-neutral-100 text-neutral-700 ring-1 ring-neutral-200">
+                                <Monitor className="size-5" />
+                              </div>
+                              <div className="min-w-0">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <h2 className="truncate text-[28px] font-semibold tracking-[-0.045em] text-neutral-950">
+                                    {selectedRuntimeWorkspace.name}
+                                  </h2>
+                                  <StatusPill tone={getRuntimeStatusTone(selectedRuntimeWorkspace.status)}>{selectedRuntimeWorkspace.status}</StatusPill>
+                                </div>
+                                <p className="mt-1 truncate font-mono text-[11px] text-neutral-400">{selectedRuntimeWorkspace.id}</p>
+                              </div>
+                            </div>
+                            <p className="mt-4 max-w-3xl text-sm leading-6 text-neutral-600">
+                              Runtime daemons act as the host layer. A single runtime can register multiple named agents with isolated prompt constraints and independent conversations.
+                            </p>
                           </div>
-                          <p className="mt-1 font-mono text-[11px] text-neutral-400">{selectedRuntimeWorkspace.id}</p>
-                        </div>
-                        <StatusPill tone={getRuntimeStatusTone(selectedRuntimeWorkspace.status)}>{selectedRuntimeWorkspace.status}</StatusPill>
-                      </div>
-                    </div>
-                    <div className="grid gap-4 lg:grid-cols-3">
-                      <DetailCard>
-                        <DetailRow label="Status" value={selectedRuntimeWorkspace.status} />
-                        <DetailRow label="Agents" value={String(runtimeWorkspaceAgents.length)} />
-                        <DetailRow label="Mode" value="daemon host" />
-                      </DetailCard>
-                      <DetailCard>
-                        <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-500">Host Summary</p>
-                        <p className="mt-3 text-sm leading-6 text-neutral-600">
-                          Runtime daemons act as the host layer. A single runtime can register multiple named Agents with isolated prompt constraints.
-                        </p>
-                      </DetailCard>
-                        <DetailCard>
-                          <div className="flex flex-col gap-2">
+                          <div className="grid gap-2 sm:grid-cols-2 xl:w-[22rem]">
                             <Button onClick={() => handleOpenAgentCreateModal(selectedRuntimeWorkspace.id)} type="button" variant="secondary">
                               <Plus className="size-4" />
-                              Create Agent
+                              New Agent
                             </Button>
                             <Button onClick={() => void handleOpenRuntimeConnectPanel()} type="button" variant="ghost">
                               <Sparkles className="size-4" />
-                              Connect Runtime
+                              Connect
+                            </Button>
+                            <Button onClick={() => handleOpenDetailPanel("runtime", selectedRuntimeWorkspace.id)} type="button" variant="ghost">
+                              <FileText className="size-4" />
+                              Inspect
+                            </Button>
+                            <Button onClick={() => void handleGenerateCommand()} type="button" variant="ghost">
+                              <Sparkles className="size-4" />
+                              Install
                             </Button>
                             <Button
-                              className="border-rose-200 text-rose-700 hover:bg-rose-50 hover:text-rose-800"
+                              className="sm:col-span-2 border-rose-200 text-rose-700 hover:bg-rose-50 hover:text-rose-800"
                               onClick={() => handleOpenRuntimeDeleteDialog(selectedRuntimeWorkspace.id)}
                               type="button"
                               variant="ghost"
                             >
                               <Trash2 className="size-4" />
-                              Delete Runtime
+                              Delete
                             </Button>
-                            <Button onClick={() => handleOpenDetailPanel("runtime", selectedRuntimeWorkspace.id)} type="button" variant="ghost">
-                              <FileText className="size-4" />
-                              Open Inspector
-                            </Button>
-                          <Button onClick={() => void handleGenerateCommand()} type="button" variant="ghost">
-                            <Sparkles className="size-4" />
-                            Add Runtime
-                          </Button>
+                          </div>
                         </div>
-                      </DetailCard>
-                    </div>
-                    <DetailCard accent="agent">
-                      <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-500">Attached Agents</p>
-                      <div className="mt-3 grid gap-2">
-                        {runtimeWorkspaceAgents.length === 0 ? (
-                          <p className="text-sm text-neutral-500">No agents are attached to this runtime yet.</p>
-                        ) : (
-                          runtimeWorkspaceAgents.map((agent) => (
-                            <div key={agent.id} className="rounded-xl border border-neutral-200 bg-white px-3 py-3">
-                              <div className="flex items-start justify-between gap-3">
-                                <button className="min-w-0 flex-1 text-left" onClick={() => handleOpenAgentWorkspace(agent.id)} type="button">
-                                  <div className="flex items-center gap-3">
-                                    <div className={`${getActorAvatarClass("agent")} size-10 text-emerald-700`}>
-                                      <Bot className="size-4" />
-                                    </div>
-                                    <div className="min-w-0">
-                                      <p className="truncate text-sm font-semibold text-neutral-950">{agent.name}</p>
-                                      <p className="mt-1 font-mono text-[11px] text-neutral-500">
-                                        {agent.implementation} / {agent.model}
-                                      </p>
-                                    </div>
-                                  </div>
-                                  <p className="mt-3 line-clamp-2 text-xs leading-5 text-neutral-600">{agent.description}</p>
-                                </button>
-                                <Button onClick={() => handleOpenAgentWorkspace(agent.id)} size="sm" type="button" variant="ghost">
-                                  Chat
-                                </Button>
+                      </div>
+
+                      <div className="grid gap-0 xl:grid-cols-[minmax(0,0.92fr)_minmax(340px,1.08fr)]">
+                        <div className="border-b border-neutral-200/80 xl:border-b-0 xl:border-r xl:border-neutral-200/80">
+                          <div className="grid gap-3 p-5 sm:grid-cols-2">
+                            <div className="rounded-[1.2rem] bg-neutral-50/90 px-4 py-3 ring-1 ring-neutral-200/70">
+                              <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-500">Status</p>
+                              <p className="mt-2 text-base font-semibold text-neutral-950">{selectedRuntimeWorkspace.status}</p>
+                              {selectedRuntimePresenceDetail ? (
+                                <p className="mt-1 text-xs text-neutral-500">{selectedRuntimePresenceDetail}</p>
+                              ) : (
+                                <p className="mt-1 text-xs text-neutral-500">Waiting for fresh daemon presence updates.</p>
+                              )}
+                            </div>
+                            <div className="rounded-[1.2rem] bg-neutral-50/90 px-4 py-3 ring-1 ring-neutral-200/70">
+                              <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-500">Attached Agents</p>
+                              <p className="mt-2 text-base font-semibold text-neutral-950">{runtimeWorkspaceAgents.length}</p>
+                              <p className="mt-1 text-xs text-neutral-500">Agents currently assigned to this host runtime.</p>
+                            </div>
+                            <div className="rounded-[1.2rem] bg-neutral-50/90 px-4 py-3 ring-1 ring-neutral-200/70">
+                              <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-500">Mode</p>
+                              <p className="mt-2 text-base font-semibold text-neutral-950">Daemon host</p>
+                              <p className="mt-1 text-xs text-neutral-500">The daemon owns agent lifecycles, sessions, and task execution.</p>
+                            </div>
+                            <div className="rounded-[1.2rem] bg-neutral-50/90 px-4 py-3 ring-1 ring-neutral-200/70">
+                              <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-500">Routing</p>
+                              <p className="mt-2 text-base font-semibold text-neutral-950">Direct + channel chat</p>
+                              <p className="mt-1 text-xs text-neutral-500">Each conversation route keeps its own isolated session context.</p>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="min-h-[28rem] p-5">
+                          <div className="flex h-full min-h-0 flex-col">
+                            <div className="flex items-center justify-between gap-3">
+                              <div>
+                                <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-500">Agents</p>
+                                <p className="mt-1 text-sm text-neutral-500">Attached workers on this runtime host.</p>
                               </div>
                             </div>
-                          ))
-                        )}
+                            <div className="mt-4 min-h-0 flex-1 overflow-y-auto pr-1">
+                              {runtimeWorkspaceAgents.length === 0 ? (
+                                <div className="flex h-full min-h-[16rem] items-center justify-center rounded-[1.25rem] bg-neutral-50/80 text-sm text-neutral-500 ring-1 ring-neutral-200/70">
+                                  No agents are attached to this runtime yet.
+                                </div>
+                              ) : (
+                                <div className="grid gap-2.5">
+                                  {runtimeWorkspaceAgents.map((agent) => (
+                                    <div
+                                      key={agent.id}
+                                      className="rounded-[1.2rem] bg-neutral-50/75 px-4 py-3 transition hover:bg-neutral-50 ring-1 ring-neutral-200/75"
+                                    >
+                                      <div className="flex items-start justify-between gap-3">
+                                        <button className="min-w-0 flex-1 text-left" onClick={() => handleOpenAgentWorkspace(agent.id)} type="button">
+                                          <div className="flex items-center gap-3">
+                                            <div className={`${getActorAvatarClass("agent")} size-10 shrink-0 text-emerald-700`}>
+                                              <Bot className="size-4" />
+                                            </div>
+                                            <div className="min-w-0">
+                                              <div className="flex flex-wrap items-center gap-2">
+                                                <p className="truncate text-sm font-semibold text-neutral-950">{agent.name}</p>
+                                                <span className="rounded-full bg-white px-2 py-0.5 font-mono text-[10px] text-neutral-500 ring-1 ring-neutral-200">
+                                                  {agent.implementation}
+                                                </span>
+                                              </div>
+                                              <p className="mt-1 font-mono text-[11px] text-neutral-500">{agent.model}</p>
+                                            </div>
+                                          </div>
+                                          <p className="mt-3 line-clamp-2 text-xs leading-5 text-neutral-600">{agent.description}</p>
+                                        </button>
+                                        <Button onClick={() => handleOpenAgentWorkspace(agent.id)} size="sm" type="button" variant="ghost">
+                                          Chat
+                                        </Button>
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
                       </div>
-                    </DetailCard>
+                    </section>
                   </div>
                 ) : (
                   <EmptyState>No runtimes connected yet.</EmptyState>
                 )}
               </div>
             </div>
+          ) : shellState.primaryView === "users" ? (
+            <div className="flex h-full flex-col">
+              <div className="min-h-0 flex-1 overflow-y-auto p-4 lg:p-5">
+                {(() => {
+                  const selectedUser = selectedUserIdForPage
+                    ? organizationMembers.find((m) => m.userId === selectedUserIdForPage) ?? null
+                    : organizationMembers[0] ?? null;
+
+                  if (!selectedUser) {
+                    return <EmptyState>No members in this workspace yet.</EmptyState>;
+                  }
+
+                  return (
+                    <div className="mx-auto max-w-6xl space-y-4">
+                      <div className="rounded-[1.25rem] border border-neutral-200 bg-white p-4">
+                        <div className="flex items-start gap-4">
+                          <AvatarBadge
+                            imageUrl={selectedUser.userId === session?.userId ? accountAvatarImage : null}
+                            glyphId={selectedUser.userId === session?.userId ? accountAvatarGlyphId : getAvatarGlyph(selectedUser.userId)}
+                            name={selectedUser.email.split("@")[0]}
+                            paletteId={selectedUser.userId === session?.userId ? accountAvatarPaletteId : getAvatarPalette(selectedUser.userId).id}
+                            size="lg"
+                          />
+                          <div>
+                            <h2 className="text-[26px] font-semibold tracking-[-0.04em] text-neutral-950">
+                              {selectedUser.email.split("@")[0]}
+                            </h2>
+                            <p className="mt-1 font-mono text-[11px] text-neutral-400">{selectedUser.userId}</p>
+                            <p className="mt-1 text-sm text-neutral-500">{selectedUser.email}</p>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="grid gap-4 lg:grid-cols-3">
+                        <DetailCard>
+                          <DetailRow label="Role" value={selectedUser.role} />
+                          <DetailRow label="Email" value={selectedUser.email} />
+                          <DetailRow label="User ID" value={selectedUser.userId} />
+                        </DetailCard>
+                        <DetailCard>
+                          <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-500">Member Info</p>
+                          <p className="mt-3 text-sm leading-6 text-neutral-600">
+                            Workspace members can collaborate in channels, interact with agents, and manage issues.
+                          </p>
+                        </DetailCard>
+                        <DetailCard>
+                          <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-500">Invite Member</p>
+                          <div className="mt-3 flex flex-col gap-2">
+                            <Input
+                              onChange={(event) => setInviteEmail(event.target.value)}
+                              onKeyDown={(event) => {
+                                if (event.key === "Enter") {
+                                  event.preventDefault();
+                                  void handleInviteMember();
+                                }
+                              }}
+                              placeholder="Email address"
+                              value={inviteEmail}
+                            />
+                            <div className="flex gap-2">
+                              <select
+                                className="flex-1 rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm text-neutral-700"
+                                onChange={(event) => setInviteRole(event.target.value as "member" | "admin")}
+                                value={inviteRole}
+                              >
+                                <option value="member">Member</option>
+                                <option value="admin">Admin</option>
+                              </select>
+                              <Button disabled={!inviteEmail.trim()} onClick={() => void handleInviteMember()} size="sm" type="button">
+                                Invite
+                              </Button>
+                            </div>
+                          </div>
+                        </DetailCard>
+                      </div>
+                      {workspaceInvitations.length > 0 ? (
+                        <DetailCard accent="agent">
+                          <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-500">Pending Invitations</p>
+                          <div className="mt-3 grid gap-2">
+                            {workspaceInvitations.filter((inv) => !inv.acceptedAt).map((invitation) => (
+                              <div key={invitation.id} className="flex items-center justify-between gap-3 rounded-xl border border-neutral-200 bg-white px-3 py-2.5">
+                                <div className="min-w-0">
+                                  <p className="truncate text-sm font-medium text-neutral-900">{invitation.email}</p>
+                                  <p className="mt-0.5 font-mono text-[11px] text-neutral-400">
+                                    {invitation.role} · invited {new Date(invitation.createdAt).toLocaleDateString()}
+                                  </p>
+                                </div>
+                                <span className="shrink-0 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700 ring-1 ring-amber-200">
+                                  pending
+                                </span>
+                              </div>
+                            ))}
+                            {workspaceInvitations.filter((inv) => inv.acceptedAt).map((invitation) => (
+                              <div key={invitation.id} className="flex items-center justify-between gap-3 rounded-xl border border-neutral-200 bg-white px-3 py-2.5">
+                                <div className="min-w-0">
+                                  <p className="truncate text-sm font-medium text-neutral-900">{invitation.email}</p>
+                                  <p className="mt-0.5 font-mono text-[11px] text-neutral-400">
+                                    {invitation.role} · accepted {new Date(invitation.acceptedAt!).toLocaleDateString()}
+                                  </p>
+                                </div>
+                                <span className="shrink-0 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700 ring-1 ring-emerald-200">
+                                  accepted
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        </DetailCard>
+                      ) : null}
+                    </div>
+                  );
+                })()}
+              </div>
+            </div>
           ) : (
             <div className="flex h-full flex-col">
-              <div className="border-b border-neutral-200 px-5 py-5">
-                <div className="flex items-center gap-2">
-                  <Settings className="size-5 text-neutral-400" />
-                  <h1 className="text-[28px] font-semibold tracking-[-0.04em]">Settings</h1>
+              <div className="border-b border-neutral-200 px-5 py-4">
+                <div className="flex flex-col gap-3">
+                  <div className="flex items-center gap-4">
+                    <Settings className="size-5 text-neutral-400" />
+                    <h1 className="text-[28px] font-semibold tracking-[-0.04em]">
+                      Settings ({selectedWorkspaceOption?.label ?? "Workspace"})
+                    </h1>
+                  </div>
+                  <div className="flex gap-1 rounded-[1rem] border border-neutral-200 bg-neutral-100 p-1">
+                    <button
+                      className={`rounded-[0.85rem] px-4 py-2 text-sm font-medium transition ${
+                        settingsTab === "account"
+                          ? "bg-white text-neutral-900 shadow-sm"
+                          : "text-neutral-500 hover:text-neutral-700"
+                      }`}
+                      onClick={() => setSettingsTab("account")}
+                      type="button"
+                    >
+                      Account
+                    </button>
+                    <button
+                      className={`rounded-[0.85rem] px-4 py-2 text-sm font-medium transition ${
+                        settingsTab === "appearance"
+                          ? "bg-white text-neutral-900 shadow-sm"
+                          : "text-neutral-500 hover:text-neutral-700"
+                      }`}
+                      onClick={() => setSettingsTab("appearance")}
+                      type="button"
+                    >
+                      Appearance
+                    </button>
+                    <button
+                      className={`rounded-[0.85rem] px-4 py-2 text-sm font-medium transition ${
+                        settingsTab === "permissions"
+                          ? "bg-white text-neutral-900 shadow-sm"
+                          : "text-neutral-500 hover:text-neutral-700"
+                      }`}
+                      onClick={() => setSettingsTab("permissions")}
+                      type="button"
+                    >
+                      Permissions
+                    </button>
+                  </div>
                 </div>
               </div>
 
               <div className="flex-1 overflow-y-auto px-5 py-5">
                 <div className="mx-auto grid max-w-3xl gap-4">
+                  {settingsTab === "account" && (
                   <DetailCard>
                     <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-500">Account</p>
                     <input
@@ -3369,7 +5041,9 @@ export function App() {
                       </div>
                     </div>
                   </DetailCard>
+                  )}
 
+                  {settingsTab === "appearance" && (
                   <DetailCard>
                     <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-500">Appearance</p>
                     <div className="mt-4 grid gap-3">
@@ -3391,7 +5065,9 @@ export function App() {
                       />
                     </div>
                   </DetailCard>
+                  )}
 
+                  {settingsTab === "account" && (
                   <DetailCard>
                     <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-500">Change Password</p>
                     <div className="mt-4 grid gap-3">
@@ -3431,8 +5107,43 @@ export function App() {
                         </Button>
                       </div>
                     </div>
-                    {settingsNotice ? <p className="mt-4 text-sm text-neutral-500">{settingsNotice}</p> : null}
+                    {settingsNotice && settingsTab === "account" ? <p className="mt-4 text-sm text-neutral-500">{settingsNotice}</p> : null}
                   </DetailCard>
+                  )}
+
+                  {settingsTab === "permissions" && (
+                  <>
+                  <DetailCard>
+                    <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-500">Invite Members</p>
+                    <div className="mt-4 flex gap-2">
+                      <Input
+                        placeholder="Email address"
+                        value={inviteEmail}
+                        onChange={(e) => setInviteEmail(e.target.value)}
+                      />
+                      <select
+                        className="rounded-[0.85rem] border border-neutral-200 px-3 py-2 text-sm"
+                        value={inviteRole}
+                        onChange={(e) => setInviteRole(e.target.value as "member" | "admin")}
+                      >
+                        <option value="member">Member</option>
+                        <option value="admin">Admin</option>
+                      </select>
+                      <Button disabled={!inviteEmail.trim()} onClick={() => void handleInviteMember()} size="sm" type="button" variant="primary">
+                        Invite
+                      </Button>
+                    </div>
+                  </DetailCard>
+
+                  <DetailCard>
+                    <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-500">Resource Permissions</p>
+                    <p className="mt-2 text-xs text-neutral-500">Manage runtime and agent access for team members.</p>
+                    <div className="mt-4 rounded-lg border border-neutral-200 bg-neutral-50 p-4">
+                      <p className="text-sm text-neutral-500">Configure permissions to control who can access agents and runtimes.</p>
+                    </div>
+                  </DetailCard>
+                  </>
+                  )}
                 </div>
               </div>
             </div>
@@ -3539,7 +5250,12 @@ export function App() {
                         <p className="text-lg font-semibold tracking-[-0.02em]">{selectedRuntime.name}</p>
                         <p className="font-mono text-[11px] text-neutral-400">{selectedRuntime.id}</p>
                       </div>
-                      <StatusPill tone={getRuntimeStatusTone(selectedRuntime.status)}>{selectedRuntime.status}</StatusPill>
+                      <div className="flex flex-col items-end gap-1">
+                        <StatusPill tone={getRuntimeStatusTone(selectedRuntime.status)}>{selectedRuntime.status}</StatusPill>
+                        {getRuntimePresenceDetail(selectedRuntime) ? (
+                          <span className="font-mono text-[11px] text-neutral-400">{getRuntimePresenceDetail(selectedRuntime)}</span>
+                        ) : null}
+                      </div>
                     </div>
                       <p className="mt-4 text-sm leading-6 text-neutral-600">
                       Runtime daemons are the host layer. Each runtime can create multiple Agents with explicit names and description-backed prompt boundaries.
@@ -3597,7 +5313,7 @@ export function App() {
               onClick={() => setIsStatusWorkspaceMenuOpen((current) => !current)}
               type="button"
             >
-              <GitBranch className="size-3" />
+              <Layers className="size-3" />
               <span>{selectedWorkspaceOption.label}</span>
             </button>
             {isStatusWorkspaceMenuOpen ? (
@@ -3631,7 +5347,7 @@ export function App() {
         </div>
         <div className="flex items-center gap-3 whitespace-nowrap text-[color:color-mix(in_srgb,var(--text-secondary)_86%,var(--accent-strong)_14%)]">
           <span>{session.role}</span>
-          <span>{session.email.split("@")[0]}</span>
+          <span>{session.email}</span>
         </div>
       </footer>
 
@@ -4186,6 +5902,82 @@ export function App() {
                 />
               </label>
 
+              <label className="grid gap-1.5">
+                <span className="text-sm font-medium text-neutral-700">Description</span>
+                <textarea
+                  className="min-h-28 rounded-[1rem] border border-neutral-200 bg-[var(--panel-muted)] px-4 py-3 text-sm leading-6 text-neutral-800 outline-none transition placeholder:text-neutral-400 focus:border-[var(--accent)] focus:bg-white"
+                  placeholder="What is this channel for? Give people and agents enough context to collaborate well."
+                  value={channelDraftDescription}
+                  onChange={(event) => setChannelDraftDescription(event.target.value)}
+                />
+              </label>
+
+              <div className="grid gap-3 rounded-[1.15rem] border border-neutral-200 bg-[var(--panel-muted)]/65 p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-medium text-neutral-800">Members</p>
+                    <p className="mt-1 text-xs text-neutral-500">Creator is added automatically. Invite people and agents now or leave it empty.</p>
+                  </div>
+                  <Badge>{channelDraftUserIds.length + channelDraftAgentIds.length} selected</Badge>
+                </div>
+
+                <div className="grid gap-2">
+                  <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-400">People</p>
+                  <div className="flex flex-wrap gap-2">
+                    {organizationMembers
+                      .filter((member) => member.userId !== session?.userId)
+                      .map((member) => {
+                        const selected = channelDraftUserIds.includes(member.userId);
+                        return (
+                          <button
+                            key={member.userId}
+                            className={`rounded-full border px-3 py-2 text-left text-sm transition ${
+                              selected
+                                ? "border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent-strong)]"
+                                : "border-neutral-200 bg-white text-neutral-700 hover:border-neutral-300"
+                            }`}
+                            onClick={() => toggleChannelDraftUser(member.userId)}
+                            type="button"
+                          >
+                            <span className="block font-medium">{member.email || member.userId}</span>
+                            <span className="block text-[11px] uppercase tracking-[0.16em] opacity-70">{member.role}</span>
+                          </button>
+                        );
+                      })}
+                    {organizationMembers.filter((member) => member.userId !== session?.userId).length === 0 ? (
+                      <p className="text-xs text-neutral-400">No additional people available yet.</p>
+                    ) : null}
+                  </div>
+                </div>
+
+                <div className="grid gap-2">
+                  <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-400">Agents</p>
+                  <div className="flex flex-wrap gap-2">
+                    {workspace?.agents.map((agent) => {
+                      const selected = channelDraftAgentIds.includes(agent.id);
+                      return (
+                        <button
+                          key={agent.id}
+                          className={`rounded-full border px-3 py-2 text-left text-sm transition ${
+                            selected
+                              ? "border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent-strong)]"
+                              : "border-neutral-200 bg-white text-neutral-700 hover:border-neutral-300"
+                          }`}
+                          onClick={() => toggleChannelDraftAgent(agent.id)}
+                          type="button"
+                        >
+                          <span className="block font-medium">{agent.name}</span>
+                          <span className="block text-[11px] uppercase tracking-[0.16em] opacity-70">
+                            {agent.implementation} / {agent.model}
+                          </span>
+                        </button>
+                      );
+                    })}
+                    {(workspace?.agents.length ?? 0) === 0 ? <p className="text-xs text-neutral-400">No agents available yet.</p> : null}
+                  </div>
+                </div>
+              </div>
+
               <div className="flex items-center justify-end gap-3 pt-2">
                 <Button onClick={handleCloseChannelCreateModal} type="button" variant="ghost">
                   Cancel
@@ -4339,6 +6131,7 @@ function RuntimeAgentTree({
           const runtimeAgents = agents.filter((agent) => agent.runtimeId === runtime.id);
           const isExpanded = expandedRuntimeIds[runtime.id] ?? false;
           const isSelected = selectedRuntimeId === runtime.id;
+          const runtimePresenceDetail = getRuntimePresenceDetail(runtime);
 
           return (
             <div key={runtime.id} className="rounded-[1rem] border border-transparent bg-[var(--panel-muted)]/70 p-1.5">
@@ -4369,7 +6162,12 @@ function RuntimeAgentTree({
                       <Monitor className="size-4 text-neutral-700" />
                       <p className="truncate text-sm font-semibold text-neutral-900">{runtime.name}</p>
                     </div>
-                    <p className="mt-1 pl-6 font-mono text-[11px] text-neutral-400">{runtimeAgents.length} agents</p>
+                    <div className="mt-1 pl-6">
+                      <p className="font-mono text-[11px] text-neutral-400">{runtimeAgents.length} agents</p>
+                      {runtimePresenceDetail ? (
+                        <p className="mt-0.5 font-mono text-[11px] text-neutral-400">{runtimePresenceDetail}</p>
+                      ) : null}
+                    </div>
                   </div>
                   <StatusPill tone={getRuntimeStatusTone(runtime.status)}>{runtime.status}</StatusPill>
                 </button>
@@ -4936,6 +6734,64 @@ function formatIssueStatus(status: IssueDTO["status"]) {
   }
 }
 
+function formatIssueActivity(activity: IssueActivityDTO, workspace: WorkspaceBootstrapPayload | null) {
+  const actorName = resolveIssueActivityActorName(activity, workspace);
+
+  switch (activity.kind) {
+    case "created":
+      return `${actorName} created this issue`;
+    case "status_changed":
+      return `${actorName} changed status from ${formatIssueStatus((activity.fromValue as IssueDTO["status"]) ?? "backlog")} to ${formatIssueStatus((activity.toValue as IssueDTO["status"]) ?? "backlog")}`;
+    case "assignee_changed":
+      return `${actorName} updated the assignee`;
+    case "priority_changed":
+      return `${actorName} changed priority from ${activity.fromValue ?? "none"} to ${activity.toValue ?? "none"}`;
+    case "due_date_changed":
+      return `${actorName} updated the due date`;
+    case "title_changed":
+      return `${actorName} renamed the issue`;
+    case "description_changed":
+      return `${actorName} updated the description`;
+    case "commented":
+      return `${actorName} posted an update`;
+    default:
+      return `${actorName} updated the issue`;
+  }
+}
+
+function resolveIssueActivityActorName(activity: IssueActivityDTO, workspace: WorkspaceBootstrapPayload | null) {
+  return (
+    workspace?.agents.find((agent) => agent.id === activity.actorId)?.name ??
+    workspace?.messages.find((message) => message.senderId === activity.actorId)?.senderId ??
+    activity.actorId
+  );
+}
+
+function formatIssueBrief(title: string, description: string) {
+  return [title.trim(), description.trim()].filter(Boolean).join("\n\n");
+}
+
+function parseIssueBrief(input: string) {
+  const lines = input.replace(/\r\n/g, "\n").split("\n");
+  const firstContentIndex = lines.findIndex((line) => line.trim().length > 0);
+
+  if (firstContentIndex < 0) {
+    return {
+      title: "",
+      description: ""
+    };
+  }
+
+  const rawTitle = lines[firstContentIndex]?.trim() ?? "";
+  const title = rawTitle.replace(/^#\s*/, "").trim();
+  const description = lines.slice(firstContentIndex + 1).join("\n").trim();
+
+  return {
+    title,
+    description
+  };
+}
+
 function formatPrimaryViewLabel(view: ShellState["primaryView"]) {
   switch (view) {
     case "chat":
@@ -4946,11 +6802,179 @@ function formatPrimaryViewLabel(view: ShellState["primaryView"]) {
       return "Agents";
     case "runtimes":
       return "Runtimes";
+    case "users":
+      return "Members";
     case "settings":
       return "Settings";
     default:
       return view;
   }
+}
+
+type AgentWorkspaceTreeNode =
+  | {
+      kind: "folder";
+      path: string;
+      label: string;
+      depth: number;
+      defaultCollapsed: boolean;
+      children: AgentWorkspaceTreeNode[];
+    }
+  | {
+      kind: "file";
+      path: string;
+      label: string;
+      depth: number;
+      size: number;
+    };
+
+function buildAgentWorkspaceTree(files: AgentWorkspaceFileSummaryDTO[], _collapsedFolders: Record<string, boolean>) {
+  const root: AgentWorkspaceTreeNode[] = [];
+  const folderMap = new Map<string, Extract<AgentWorkspaceTreeNode, { kind: "folder" }>>();
+
+  for (const file of [...files].sort((left, right) => left.path.localeCompare(right.path))) {
+    const segments = file.path.split("/").filter(Boolean);
+    let parentChildren = root;
+
+    for (let index = 0; index < segments.length - 1; index += 1) {
+      const folderPath = segments.slice(0, index + 1).join("/");
+      let folderNode = folderMap.get(folderPath);
+
+      if (!folderNode) {
+        folderNode = {
+          kind: "folder",
+          path: folderPath,
+          label: segments[index] ?? folderPath,
+          depth: index,
+          defaultCollapsed: index > 0,
+          children: []
+        };
+        folderMap.set(folderPath, folderNode);
+        parentChildren.push(folderNode);
+      }
+
+      parentChildren = folderNode.children;
+    }
+
+    parentChildren.push({
+      kind: "file",
+      path: file.path,
+      label: segments[segments.length - 1] ?? file.path,
+      depth: Math.max(segments.length - 1, 0),
+      size: file.size
+    });
+  }
+
+  return root;
+}
+
+function AgentWorkspaceTree({
+  tree,
+  collapsedFolders,
+  onToggleFolder,
+  onSelectFile,
+  selectedFilePath
+}: {
+  tree: AgentWorkspaceTreeNode[];
+  collapsedFolders: Record<string, boolean>;
+  onToggleFolder: (path: string, defaultCollapsed: boolean) => void;
+  onSelectFile: (path: string) => void;
+  selectedFilePath: string | null;
+}) {
+  return (
+    <div className="grid gap-0.5">
+      {tree.map((node) => (
+        <AgentWorkspaceTreeNodeView
+          key={node.path}
+          collapsedFolders={collapsedFolders}
+          node={node}
+          onSelectFile={onSelectFile}
+          onToggleFolder={onToggleFolder}
+          selectedFilePath={selectedFilePath}
+        />
+      ))}
+    </div>
+  );
+}
+
+function AgentWorkspaceTreeNodeView({
+  node,
+  collapsedFolders,
+  onToggleFolder,
+  onSelectFile,
+  selectedFilePath
+}: {
+  node: AgentWorkspaceTreeNode;
+  collapsedFolders: Record<string, boolean>;
+  onToggleFolder: (path: string, defaultCollapsed: boolean) => void;
+  onSelectFile: (path: string) => void;
+  selectedFilePath: string | null;
+}) {
+  if (node.kind === "file") {
+    return (
+      <button
+        className={`flex w-full items-center justify-between gap-3 rounded-[0.8rem] px-3 py-1.5 text-left transition ${
+          selectedFilePath === node.path
+            ? "bg-emerald-50 text-emerald-900 shadow-[inset_0_0_0_1px_rgba(16,185,129,0.18)]"
+            : "text-neutral-700 hover:bg-neutral-100/80"
+        }`}
+        onClick={() => onSelectFile(node.path)}
+        style={{ paddingLeft: `${12 + node.depth * 18}px` }}
+        type="button"
+      >
+        <span className="flex min-w-0 items-center gap-2">
+          <FileText className="size-3.5 shrink-0 text-neutral-400" />
+          <span className="min-w-0 truncate font-mono text-[12px] leading-5">{node.label}</span>
+        </span>
+        <span className="shrink-0 font-mono text-[11px] uppercase tracking-[0.12em] text-neutral-400">
+          {formatFileSize(node.size)}
+        </span>
+      </button>
+    );
+  }
+
+  const isCollapsed = collapsedFolders[node.path] ?? node.defaultCollapsed;
+
+  return (
+    <div className="grid gap-0.5">
+      <button
+        className="flex w-full items-center gap-2 rounded-[0.8rem] px-3 py-1.5 text-left text-[12px] font-medium text-neutral-600 transition hover:bg-neutral-100/80"
+        onClick={() => onToggleFolder(node.path, node.defaultCollapsed)}
+        style={{ paddingLeft: `${12 + node.depth * 18}px` }}
+        type="button"
+      >
+        {isCollapsed ? <ChevronRight className="size-3.5 shrink-0 text-neutral-400" /> : <ChevronDown className="size-3.5 shrink-0 text-neutral-400" />}
+        {isCollapsed ? <Folder className="size-3.5 shrink-0 text-amber-500" /> : <FolderOpen className="size-3.5 shrink-0 text-amber-500" />}
+        <span className="truncate">{node.label}</span>
+      </button>
+      {!isCollapsed ? (
+        <div className="grid gap-0.5">
+          {node.children.map((child) => (
+            <AgentWorkspaceTreeNodeView
+              key={child.path}
+              collapsedFolders={collapsedFolders}
+              node={child}
+              onSelectFile={onSelectFile}
+              onToggleFolder={onToggleFolder}
+              selectedFilePath={selectedFilePath}
+            />
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function formatFileSize(size: number) {
+  if (size >= 1024 * 1024) {
+    return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  if (size >= 1024) {
+    return `${Math.round(size / 1024)} KB`;
+  }
+
+  return `${size} B`;
 }
 
 function formatAttachmentSize(size: number) {
@@ -4963,6 +6987,25 @@ function formatAttachmentSize(size: number) {
   }
 
   return `${size} B`;
+}
+
+function getMentionDraft(value: string, caret: number) {
+  const beforeCaret = value.slice(0, caret);
+  const match = /(^|\s)@([\w.-]*)$/.exec(beforeCaret);
+
+  if (!match || match.index === undefined) {
+    return null;
+  }
+
+  const prefix = match[1] ?? "";
+  const query = match[2] ?? "";
+  const start = match.index + prefix.length;
+
+  return {
+    query,
+    start,
+    end: caret
+  };
 }
 
 async function readFileAsDataUrl(file: File) {

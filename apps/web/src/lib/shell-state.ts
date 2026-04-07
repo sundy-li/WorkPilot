@@ -1,6 +1,6 @@
-import type { ChannelSummary } from "@workpilot/shared";
+import type { AgentIdentity, ChannelSummary } from "@workpilot/shared";
 
-export type PrimaryView = "chat" | "kanban" | "agents" | "runtimes" | "settings";
+export type PrimaryView = "chat" | "kanban" | "agents" | "runtimes" | "users" | "settings";
 export type ConversationTargetKind = "channel" | "agent";
 
 export interface ConversationTarget {
@@ -15,7 +15,7 @@ export interface ShellState {
   detailOpen: boolean;
 }
 
-export function createInitialShellState(channels: ChannelSummary[], workspaceId = "org_demo"): ShellState {
+export function createInitialShellState(channels: ChannelSummary[], workspaceId = ""): ShellState {
   return {
     workspaceId,
     primaryView: "chat",
@@ -54,6 +54,23 @@ export function selectWorkspace(state: ShellState, workspaceId: string, channels
     },
     detailOpen: false
   };
+}
+
+export function reconcileInvalidActiveTarget(
+  state: ShellState,
+  channels: ChannelSummary[],
+  agents: AgentIdentity[]
+): ShellState {
+  if (state.primaryView !== "chat") {
+    return state;
+  }
+
+  const hasTarget =
+    state.activeTarget.kind === "channel"
+      ? channels.some((channel) => channel.id === state.activeTarget.id)
+      : agents.some((agent) => agent.id === state.activeTarget.id);
+
+  return hasTarget ? state : createInitialShellState(channels, state.workspaceId);
 }
 
 export function getDefaultChannelId(channels: ChannelSummary[]) {

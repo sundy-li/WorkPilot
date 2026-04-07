@@ -7,6 +7,16 @@ export type MessageSenderType = "user" | "agent" | "system";
 export type MessageAttachmentKind = "image" | "file";
 export type IssueStatus = "backlog" | "todo" | "in_progress" | "in_review" | "done";
 export type IssuePriority = "low" | "medium" | "high";
+export type IssueActivityActorType = "user" | "agent" | "system";
+export type IssueActivityKind =
+  | "created"
+  | "status_changed"
+  | "assignee_changed"
+  | "priority_changed"
+  | "due_date_changed"
+  | "title_changed"
+  | "description_changed"
+  | "commented";
 export type AgentImplementation = "claude" | "codex" | "opencode" | "pi";
 export type AgentReasoningEffort = "low" | "medium" | "high";
 export type AgentLifecycleState = "running" | "stopped" | "deleted";
@@ -106,8 +116,23 @@ export interface Issue {
   dueDate: string | null;
   project: string | null;
   sourceChannelId: string | null;
+  discussionChannelId: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface IssueActivity {
+  id: string;
+  organizationId: string;
+  issueId: string;
+  actorId: string;
+  actorType: IssueActivityActorType;
+  kind: IssueActivityKind;
+  field: string | null;
+  fromValue: string | null;
+  toValue: string | null;
+  message: string | null;
+  createdAt: string;
 }
 
 export interface AuditLog {
@@ -119,6 +144,20 @@ export interface AuditLog {
   targetId: string;
 }
 
+export interface AgentRunLog {
+  id: string;
+  organizationId: string;
+  runtimeId: string;
+  agentId: string;
+  channelId: string | null;
+  issueId: string | null;
+  sessionId: string;
+  kind: "direct_message" | "issue";
+  prompt: string;
+  response: string;
+  createdAt: string;
+}
+
 export interface WorkspaceSnapshot {
   organization: Organization;
   registrationTokens: RuntimeRegistrationToken[];
@@ -126,9 +165,12 @@ export interface WorkspaceSnapshot {
   agents: AgentProfile[];
   agentControlActions: AgentControlAction[];
   agentMessageClaims: AgentMessageClaim[];
+  agentRunLogs: AgentRunLog[];
   messages: Message[];
   issues: Issue[];
+  issueActivities: IssueActivity[];
   auditLogs: AuditLog[];
+  pendingAgentResponses: PendingAgentResponse[];
 }
 
 export interface CreateWorkspaceSnapshotInput {
@@ -234,6 +276,19 @@ export interface CreateIssueInput {
   now?: string;
 }
 
+export interface UpdateIssueInput {
+  issueId: string;
+  actorId: string;
+  status?: IssueStatus;
+  assigneeId?: string | null;
+  title?: string;
+  description?: string;
+  priority?: IssuePriority;
+  dueDate?: string | null;
+  project?: string | null;
+  now?: string;
+}
+
 export interface ClaimRuntimeIssuesInput {
   runtimeId: string;
   limit?: number;
@@ -273,6 +328,18 @@ export interface RecordAgentMessageResponseInput {
   occurredAt?: string;
 }
 
+export interface RecordAgentRunLogInput {
+  runtimeId: string;
+  agentId: string;
+  channelId?: string | null;
+  issueId?: string | null;
+  sessionId: string;
+  kind: "direct_message" | "issue";
+  prompt: string;
+  response: string;
+  now?: string;
+}
+
 export const messageAttachmentDtoSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -303,12 +370,27 @@ export const issueDtoSchema = z.object({
   dueDate: z.string().nullable(),
   project: z.string().nullable(),
   sourceChannelId: z.string().nullable(),
+  discussionChannelId: z.string(),
   createdAt: z.string(),
   updatedAt: z.string()
 });
 
+export const issueActivityDtoSchema = z.object({
+  id: z.string(),
+  issueId: z.string(),
+  actorId: z.string(),
+  actorType: z.enum(["user", "agent", "system"]),
+  kind: z.enum(["created", "status_changed", "assignee_changed", "priority_changed", "due_date_changed", "title_changed", "description_changed", "commented"]),
+  field: z.string().nullable(),
+  fromValue: z.string().nullable(),
+  toValue: z.string().nullable(),
+  message: z.string().nullable(),
+  createdAt: z.string()
+});
+
 export type MessageDTO = z.infer<typeof messageDtoSchema>;
 export type IssueDTO = z.infer<typeof issueDtoSchema>;
+export type IssueActivityDTO = z.infer<typeof issueActivityDtoSchema>;
 
 export function createWorkspaceSnapshot(input: CreateWorkspaceSnapshotInput): WorkspaceSnapshot {
   return {
@@ -318,10 +400,35 @@ export function createWorkspaceSnapshot(input: CreateWorkspaceSnapshotInput): Wo
     agents: [],
     agentControlActions: [],
     agentMessageClaims: [],
+    agentRunLogs: [],
     messages: [],
     issues: [],
-    auditLogs: []
+    issueActivities: [],
+    auditLogs: [],
+    pendingAgentResponses: []
   };
+}
+
+export function appendIssueActivity(
+  workspace: WorkspaceSnapshot,
+  input: Omit<IssueActivity, "id" | "organizationId"> & { id?: string; organizationId?: string }
+): IssueActivity {
+  const activity: IssueActivity = {
+    id: input.id ?? createId("isa"),
+    organizationId: input.organizationId ?? workspace.organization.id,
+    issueId: input.issueId,
+    actorId: input.actorId,
+    actorType: input.actorType,
+    kind: input.kind,
+    field: input.field,
+    fromValue: input.fromValue,
+    toValue: input.toValue,
+    message: input.message,
+    createdAt: input.createdAt
+  };
+
+  workspace.issueActivities.push(activity);
+  return activity;
 }
 
 export function createRuntimeRegistrationToken(
@@ -382,6 +489,10 @@ export function registerRuntimeDaemon(
     token.usedAt = token.usedAt ?? now;
     token.usedRuntimeKey = token.usedRuntimeKey ?? input.runtimeKey;
     return existingRuntime;
+  }
+
+  if (workspace.runtimes.some((r) => r.name.toLowerCase() === input.runtimeName.toLowerCase() && r.status !== "deleted")) {
+    throw new Error("A runtime with this name already exists.");
   }
 
   token.usedAt = now;
@@ -506,6 +617,10 @@ export function createAgentProfile(workspace: WorkspaceSnapshot, input: CreateAg
     throw new Error("Runtime daemon was not found.");
   }
 
+  if (workspace.agents.some((a) => a.name.toLowerCase() === input.name.toLowerCase())) {
+    throw new Error("An agent with this name already exists.");
+  }
+
   const createdAt = input.now ?? new Date().toISOString();
   const agent: AgentProfile = {
     id: createId("agt"),
@@ -616,6 +731,28 @@ export function createMessage(workspace: WorkspaceSnapshot, input: CreateMessage
   };
 
   workspace.messages.push(message);
+
+  if (input.senderType === "user" && input.content) {
+    const { agentIds, isMentionAll } = parseMentions(input.content, workspace.agents);
+    const targetAgentIds = isMentionAll ? workspace.agents.map((a) => a.id) : agentIds;
+
+    for (const agentId of targetAgentIds) {
+      const agent = workspace.agents.find((a) => a.id === agentId);
+      if (agent && agent.status === "running") {
+        workspace.pendingAgentResponses.push({
+          id: createId("par"),
+          agentId,
+          channelId: input.channelId,
+          messageId: message.id,
+          prompt: input.content,
+          status: "pending",
+          createdAt,
+          completedAt: null
+        });
+      }
+    }
+  }
+
   return message;
 }
 
@@ -647,11 +784,23 @@ export function createIssue(workspace: WorkspaceSnapshot, input: CreateIssueInpu
     dueDate: input.dueDate ?? null,
     project: input.project ?? null,
     sourceChannelId: input.sourceChannelId ?? null,
+    discussionChannelId: createId("ich"),
     createdAt,
     updatedAt: createdAt
   };
 
   workspace.issues.push(issue);
+  appendIssueActivity(workspace, {
+    issueId: issue.id,
+    actorId: input.actorId,
+    actorType: "user",
+    kind: "created",
+    field: null,
+    fromValue: null,
+    toValue: issue.status,
+    message: issue.description || null,
+    createdAt
+  });
   appendAuditLog(workspace, {
     action: "issue.created",
     actorId: input.actorId,
@@ -711,8 +860,21 @@ export function claimRuntimeIssues(
     .slice(0, limit);
 
   return issues.map((issue) => {
+    const previousStatus = issue.status;
     issue.status = "in_progress";
     issue.updatedAt = claimedAt;
+
+    appendIssueActivity(workspace, {
+      issueId: issue.id,
+      actorId: issue.assigneeId ?? input.runtimeId,
+      actorType: issue.assigneeId ? "agent" : "system",
+      kind: "status_changed",
+      field: "status",
+      fromValue: previousStatus,
+      toValue: issue.status,
+      message: "Claimed from the runtime issue queue.",
+      createdAt: claimedAt
+    });
 
     appendAuditLog(workspace, {
       action: "issue.claimed",
@@ -801,13 +963,42 @@ export function recordAgentIssueEvent(
     throw new Error("Agent was not found.");
   }
 
+  const previousStatus = issue.status;
   issue.status = input.status;
   issue.updatedAt = occurredAt;
+
+  if (previousStatus !== input.status) {
+    appendIssueActivity(workspace, {
+      issueId: issue.id,
+      actorId: input.agentId,
+      actorType: "agent",
+      kind: "status_changed",
+      field: "status",
+      fromValue: previousStatus,
+      toValue: input.status,
+      message: null,
+      createdAt: occurredAt
+    });
+  }
+
+  if (input.message && input.message.trim().length > 0) {
+    appendIssueActivity(workspace, {
+      issueId: issue.id,
+      actorId: input.agentId,
+      actorType: "agent",
+      kind: "commented",
+      field: null,
+      fromValue: null,
+      toValue: null,
+      message: input.message.trim(),
+      createdAt: occurredAt
+    });
+  }
 
   const message =
     input.message && input.message.trim().length > 0
       ? createMessage(workspace, {
-          channelId: issue.sourceChannelId ?? agent?.channelId ?? "chn_general",
+          channelId: issue.discussionChannelId,
           content: input.message.trim(),
           senderId: agent.id,
           senderType: "agent",
@@ -867,6 +1058,29 @@ export function recordAgentMessageResponse(
   return response;
 }
 
+export function recordAgentRunLog(
+  workspace: WorkspaceSnapshot,
+  input: RecordAgentRunLogInput
+): AgentRunLog {
+  const createdAt = input.now ?? new Date().toISOString();
+  const log: AgentRunLog = {
+    id: createId("log"),
+    organizationId: workspace.organization.id,
+    runtimeId: input.runtimeId,
+    agentId: input.agentId,
+    channelId: input.channelId ?? null,
+    issueId: input.issueId ?? null,
+    sessionId: input.sessionId,
+    kind: input.kind,
+    prompt: input.prompt,
+    response: input.response,
+    createdAt
+  };
+
+  workspace.agentRunLogs.push(log);
+  return log;
+}
+
 function appendAuditLog(
   workspace: WorkspaceSnapshot,
   input: Omit<AuditLog, "id" | "organizationId">
@@ -884,4 +1098,36 @@ function createId(prefix: string): string {
 
 function createSecret(prefix: string): string {
   return `${prefix}_${crypto.randomUUID().replace(/-/g, "")}`;
+}
+
+export interface PendingAgentResponse {
+  id: string;
+  agentId: string;
+  channelId: string;
+  messageId: string;
+  prompt: string;
+  status: "pending" | "processing" | "completed" | "failed";
+  createdAt: string;
+  completedAt: string | null;
+}
+
+export function parseMentions(content: string, agents: AgentProfile[]): { agentIds: string[]; isMentionAll: boolean } {
+  const mentionRegex = /@(\w+)/g;
+  const mentions: string[] = [];
+  let isMentionAll = false;
+  let match;
+
+  while ((match = mentionRegex.exec(content)) !== null) {
+    const mention = match[1].toLowerCase();
+    if (mention === "all") {
+      isMentionAll = true;
+    } else {
+      const agent = agents.find((a) => a.name.toLowerCase() === mention || a.implementation === mention);
+      if (agent && !mentions.includes(agent.id)) {
+        mentions.push(agent.id);
+      }
+    }
+  }
+
+  return { agentIds: mentions, isMentionAll };
 }

@@ -37,7 +37,7 @@ WorkPilot is an Agent-native collaboration workspace built as a Bun-based monore
 │  │                    Storage Layer                                 │    │
 │  │  ┌─────────────────────┐  ┌──────────────────────────────┐      │    │
 │  │  │  In-Memory Storage │  │    Postgres Storage          │      │    │
-│  │  │  (Testing/Dev)     │  │    (Production)              │      │    │
+│  │  │  (Tests Only)      │  │    (Runtime)                 │      │    │
 │  │  └─────────────────────┘  └──────────────────────────────┘      │    │
 │  └─────────────────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────────────────┘
@@ -77,9 +77,12 @@ A React-based IM workbench built with:
 **Key Features:**
 - Login/logout functionality
 - Channel rail with group and direct messages
+- Channel-side context tools for editing metadata and inspecting current members
+- Composer `@mention` suggestions scoped to channel agents and members
 - Message stream with real-time-like updates
 - Agent rail showing all registered agents
-- Issue/task rail with Kanban-style display
+- Agent workspace browser for inspecting synced `memory.md`, `worklog.md`, and session files
+- Issue/task rail with Kanban-style display plus a dedicated issue workspace page for editing and activity review
 - Runtime daemon connection panel
 - Agent creation and lifecycle control
 - Theme switching (core, mint, amber, rose)
@@ -101,13 +104,21 @@ A Bun + Hono HTTP API server providing:
 **Authentication Routes:**
 - `POST /auth/register` - User registration
 - `POST /auth/login` - Email/password login
+- `GET /workspaces?userId=...` - List workspaces visible to a user
+- `POST /workspaces` - Create a workspace and default `all` channel
 - `POST /auth/magic-link/send` - Magic link email dispatch
 - `POST /auth/magic-link/verify` - Magic link verification
+
+**Workspace Entry Behavior:**
+- After login, the web app loads the user's real workspace list from the control-plane
+- If the list is empty, the UI blocks the main app and requires creating a first workspace
 
 **Organization & Channel Routes:**
 - `GET /organizations/:orgId` - Get organization details
 - `GET /organizations/:orgId/channels` - List channels
 - `POST /organizations/:orgId/channels` - Create channel
+- `PATCH /channels/:channelId` - Update channel name/description
+- `GET /channels/:channelId/participants` - List channel members and agent participants
 
 **Runtime Daemon Routes:**
 - `POST /organizations/:orgId/runtime-registration-tokens` - Generate install command
@@ -118,6 +129,8 @@ A Bun + Hono HTTP API server providing:
 **Agent Routes:**
 - `POST /runtimes/:runtimeId/agents` - Create agent
 - `POST /agents/:agentId/control` - Agent lifecycle control (start/stop/restart/delete)
+- `GET /agents/:agentId/workspace-files` - List synced agent workspace files
+- `GET /agents/:agentId/workspace-files/content?path=...` - Read one synced agent workspace file
 - `GET /runtimes/:runtimeId/control-actions` - Poll control actions
 - `POST /control-actions/:actionId/ack` - Acknowledge control action
 - `POST /agents/:agentId/direct-channel` - Create direct message channel
@@ -130,13 +143,17 @@ A Bun + Hono HTTP API server providing:
 
 **Issue Routes:**
 - `POST /issues` - Create issue
-- `PATCH /issues/:issueId` - Update issue status
+- `PATCH /issues/:issueId` - Update issue fields and status
+- `DELETE /issues/:issueId` - Delete issue
+- `GET /issues/:issueId/activities` - Read issue activity timeline
+- `POST /issues/:issueId/comments` - Append a human or agent comment to the issue timeline
 - `POST /runtime/issues/pull` - Runtime pulls assigned issues
-- `POST /agent/issue-events` - Agent updates issue status
+- `POST /agent/issue-events` - Agent updates issue status and emits issue activity entries
 
 **Agent Event Routes:**
 - `POST /runtime/messages/pull` - Runtime pulls messages for agent processing
 - `POST /agent/message-events` - Agent writes response back to channel
+- `POST /agent/workspace-files` - Runtime syncs a read-only snapshot of local agent workspace files
 
 **Entry Points:**
 - `apps/control-plane/src/index.ts` - Server entry point
@@ -160,6 +177,9 @@ A Bun-based runtime daemon that:
 - Creates and manages agent sessions
 - Enforces agent lifecycle (start/stop/restart/delete)
 - Handles prompt execution and response capture
+- Persists a stable local agent workspace under `~/.workpilot/agents/<agentId>/`
+- Maintains `memory.md`, `worklog.md`, and per-conversation `sessions/<conversationKey>/transcript.ndjson` plus `summary.md`
+- Syncs those files back to the control-plane so the web app can inspect them without direct filesystem access
 
 **Runtime Core (`runtime.ts`):**
 - Polling loops for heartbeats, control actions, and tasks
@@ -279,6 +299,7 @@ Shared React UI components:
    
 2. Daemon polls assigned issues
    POST /runtime/issues/pull
+   - Assigned `todo` issues are claimed from the runtime queue and moved to `in_progress`
    
 3. Daemon executes task
    - Loads agent implementation
@@ -288,8 +309,14 @@ Shared React UI components:
 4. Daemon writes event back
    POST /agent/issue-events
    - Updates issue status
-   
-5. Optional: Agent writes message
+   - Persists issue activity for status changes and agent updates
+
+5. Review loop
+   - Successful agent execution moves the issue to `in_review`
+   - Humans can comment on the issue timeline and either mark it `done` or move it back to `todo`
+   - When it returns to `todo`, the next runtime claim includes prior comments/activity in the agent prompt
+
+6. Optional: Agent writes message
    POST /agent/message-events
    - Posts response to channel
 ```

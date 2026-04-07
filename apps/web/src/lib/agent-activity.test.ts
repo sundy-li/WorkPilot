@@ -17,6 +17,7 @@ describe("agent activity", () => {
     ).toEqual({
       tone: "warning",
       label: "running",
+      presenceLabel: "Typing...",
       summary: "Codex CLI is applying repository changes.",
       detail: "Streaming tool output"
     });
@@ -31,6 +32,7 @@ describe("agent activity", () => {
     ).toEqual({
       tone: "neutral",
       label: "idle",
+      presenceLabel: "Idle",
       summary: "Claude is connected and waiting for the next instruction.",
       detail: null
     });

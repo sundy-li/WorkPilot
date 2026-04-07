@@ -1,5 +1,9 @@
 import type {
   AgentActivityEventPayload,
+  AgentRunLogDTO,
+  AgentRunLogEventPayload,
+  AgentWorkspaceFileContentDTO,
+  AgentWorkspaceFileSummaryDTO,
   AgentControlActionDTO,
   AgentIssueEventPayload,
   AgentMessageResponsePayload,
@@ -26,7 +30,9 @@ export interface SendRuntimeHeartbeatInput extends DaemonFetchContext {
   occurredAt?: string;
 }
 
-export type GetWorkspaceBootstrapInput = DaemonFetchContext;
+export interface GetWorkspaceBootstrapInput extends DaemonFetchContext {
+  runtimeId?: string;
+}
 
 export interface GetRuntimeControlActionsInput extends DaemonFetchContext {
   runtimeId: string;
@@ -103,6 +109,14 @@ export interface AgentActivityEventResponse {
   };
 }
 
+export interface AgentRunLogEventResponse {
+  log: AgentRunLogDTO;
+}
+
+export interface AgentWorkspaceFilesSyncResponse {
+  files: AgentWorkspaceFileSummaryDTO[];
+}
+
 export async function registerRuntimeDaemon(input: RegisterRuntimeDaemonInput): Promise<RegisteredRuntimeDaemon> {
   return requestJson<RegisteredRuntimeDaemon>(input, "/runtime/register", {
     method: "POST",
@@ -127,7 +141,13 @@ export async function sendRuntimeHeartbeat(input: SendRuntimeHeartbeatInput): Pr
 export async function getWorkspaceBootstrap(
   input: GetWorkspaceBootstrapInput
 ): Promise<WorkspaceBootstrapPayload> {
-  return requestJson<WorkspaceBootstrapPayload>(input, "/bootstrap/workspace", {
+  const params = new URLSearchParams();
+  if (input.runtimeId) {
+    params.set("runtimeId", input.runtimeId);
+  }
+  const search = params.toString() ? `?${params.toString()}` : "";
+
+  return requestJson<WorkspaceBootstrapPayload>(input, `/bootstrap/workspace${search}`, {
     method: "GET"
   });
 }
@@ -213,6 +233,37 @@ export async function recordAgentMessageResponse(
       sourceMessageId: input.sourceMessageId,
       content: input.content,
       occurredAt: input.occurredAt
+    })
+  });
+}
+
+export async function recordAgentRunLog(
+  input: DaemonFetchContext & AgentRunLogEventPayload
+): Promise<AgentRunLogEventResponse> {
+  return requestJson<AgentRunLogEventResponse>(input, "/agent/run-logs", {
+    method: "POST",
+    body: JSON.stringify({
+      agentId: input.agentId,
+      runtimeId: input.runtimeId,
+      channelId: input.channelId,
+      issueId: input.issueId,
+      sessionId: input.sessionId,
+      kind: input.kind,
+      prompt: input.prompt,
+      response: input.response,
+      occurredAt: input.occurredAt
+    })
+  });
+}
+
+export async function syncAgentWorkspaceFiles(
+  input: DaemonFetchContext & { agentId: string; files: AgentWorkspaceFileContentDTO[] }
+): Promise<AgentWorkspaceFilesSyncResponse> {
+  return requestJson<AgentWorkspaceFilesSyncResponse>(input, "/agent/workspace-files", {
+    method: "POST",
+    body: JSON.stringify({
+      agentId: input.agentId,
+      files: input.files
     })
   });
 }

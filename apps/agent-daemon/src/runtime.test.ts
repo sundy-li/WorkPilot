@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { TEST_ORG_ID } from "@workpilot/shared";
 import { createControlPlaneApp } from "../../control-plane/src/app";
 import type { AgentIdentity } from "@workpilot/shared";
 import { registerRuntimeDaemon, type DaemonFetcher } from "./client";
@@ -23,7 +24,7 @@ class MemoryStateStore implements DaemonStateStore {
 
 class RecordingAgentHost implements DaemonAgentHost {
   readonly syncCalls: AgentIdentity[][] = [];
-  readonly runCalls: Array<{ agentId: string; prompt: string }> = [];
+  readonly runCalls: Array<{ agentId: string; prompt: string; conversationKey?: string }> = [];
   readonly setStatusCalls: Array<{ agentId: string; status: AgentIdentity["status"] }> = [];
   readonly restartCalls: Array<{ agentId: string; mode: "restart" | "reset_session" | "full_reset" | null }> = [];
   readonly deleteCalls: string[] = [];
@@ -38,18 +39,22 @@ class RecordingAgentHost implements DaemonAgentHost {
     this.syncCalls.push(agents);
   }
 
-  async run(agent: AgentIdentity, prompt: string) {
+  async run(agent: AgentIdentity, prompt: string, options?: { conversationKey?: string }) {
     this.runCalls.push({
       agentId: agent.id,
-      prompt
+      prompt,
+      conversationKey: options?.conversationKey
     });
 
-    return {
-      sessionId: "ses_demo",
-      implementationPackage:
-        agent.implementation === "codex" ? "@rivet-dev/agent-os-codex-agent" : "@rivet-dev/agent-os-claude",
-      responseText: `Reply from ${agent.name}: ${prompt.slice(0, 32)}`
-    };
+      return {
+        sessionId: "ses_demo",
+        implementationPackage: agent.implementation,
+        responseText: `Reply from ${agent.name}: ${prompt.slice(0, 32)}`
+      };
+  }
+
+  async listWorkspaceFiles() {
+    return [];
   }
 
   async setAgentStatus(agentId: string, status: AgentIdentity["status"]) {
@@ -70,27 +75,37 @@ class RecordingAgentHost implements DaemonAgentHost {
 }
 
 class ManualScheduler implements DaemonRuntimeScheduler {
-  callback: (() => Promise<void>) | null = null;
+  callbacks = new Map<number, () => Promise<void>>();
   intervalMs: number | null = null;
   stopped = false;
 
   scheduleEvery(callback: () => Promise<void>, intervalMs: number) {
-    this.callback = callback;
+    this.callbacks.set(intervalMs, callback);
     this.intervalMs = intervalMs;
 
     return {
       stop: () => {
         this.stopped = true;
+        this.callbacks.delete(intervalMs);
       }
     };
   }
 
-  async tick() {
-    if (!this.callback) {
+  async tick(intervalMs?: number) {
+    const callback =
+      typeof intervalMs === "number"
+        ? this.callbacks.get(intervalMs) ?? null
+        : [...this.callbacks.values()][0] ?? null;
+
+    if (!callback) {
       throw new Error("Scheduler callback was not registered.");
     }
 
-    await this.callback();
+    await callback();
+  }
+
+  get intervals() {
+    return [...this.callbacks.keys()].sort((left, right) => left - right);
   }
 }
 
@@ -118,7 +133,7 @@ class RecordingAgentActivityReporter {
 
 async function issueRegistrationToken(fetcher: DaemonFetcher) {
   const response = await fetcher(
-    new Request("http://control-plane.local/organizations/org_demo/runtime-registration-tokens", {
+    new Request(`http://control-plane.local/organizations/${TEST_ORG_ID}/runtime-registration-tokens`, {
       method: "POST",
       headers: {
         "content-type": "application/json"
@@ -153,6 +168,7 @@ describe("daemon runtime", () => {
         nodeName: "ops-runtime",
         agentKey: "runtime_001",
         heartbeatIntervalMs: 30_000,
+        messagePollIntervalMs: 1_000,
         statePath: "/tmp/workpilot-agent-daemon/state.json",
         workspaceRoot: "/tmp/workpilot-agent-daemon/workspace"
       },
@@ -178,6 +194,7 @@ describe("daemon runtime", () => {
         nodeName: "ops-runtime",
         agentKey: "runtime_001",
         heartbeatIntervalMs: 30_000,
+        messagePollIntervalMs: 1_000,
         statePath: "/tmp/workpilot-agent-daemon/state.json",
         workspaceRoot: "/tmp/workpilot-agent-daemon/workspace"
       },
@@ -193,6 +210,70 @@ describe("daemon runtime", () => {
 
     const secondState = await stateStore.load();
     expect(secondState?.runtimeId).toBe(firstState?.runtimeId);
+
+    await secondRuntime.stop();
+  });
+
+  test("reuses persisted runtime registration even when a different agent key is provided later", async () => {
+    const app = createControlPlaneApp({
+      controlPlaneUrl: "http://control-plane.local"
+    });
+    const stateStore = new MemoryStateStore();
+    const registrationToken = await issueRegistrationToken(app.fetch);
+
+    const firstRuntime = createDaemonRuntime(
+      {
+        controlPlaneUrl: "http://control-plane.local",
+        registrationToken,
+        nodeName: "ops-runtime",
+        agentKey: "host_ops_runtime",
+        heartbeatIntervalMs: 30_000,
+        messagePollIntervalMs: 1_000,
+        statePath: "/tmp/workpilot-agent-daemon/state.json",
+        workspaceRoot: "/tmp/workpilot-agent-daemon/workspace"
+      },
+      {
+        fetcher: app.fetch,
+        stateStore,
+        agentHost: new RecordingAgentHost(),
+        scheduler: new ManualScheduler()
+      }
+    );
+
+    await firstRuntime.start();
+    const firstState = await stateStore.load();
+    await firstRuntime.stop();
+
+    const secondRuntime = createDaemonRuntime(
+      {
+        controlPlaneUrl: "http://control-plane.local",
+        registrationToken,
+        nodeName: "ops-runtime",
+        agentKey: "different_runtime_key",
+        heartbeatIntervalMs: 30_000,
+        messagePollIntervalMs: 1_000,
+        statePath: "/tmp/workpilot-agent-daemon/state.json",
+        workspaceRoot: "/tmp/workpilot-agent-daemon/workspace"
+      },
+      {
+        fetcher: app.fetch,
+        stateStore,
+        agentHost: new RecordingAgentHost(),
+        scheduler: new ManualScheduler()
+      }
+    );
+
+    await secondRuntime.start();
+
+    const secondState = await stateStore.load();
+    expect(secondState?.runtimeId).toBe(firstState?.runtimeId);
+    expect(secondState?.runtimeKey).toBe(firstState?.runtimeKey);
+
+    const bootstrap = await secondRuntime.client.getWorkspaceBootstrap({
+      controlPlaneUrl: "http://control-plane.local",
+      fetcher: app.fetch
+    });
+    expect(bootstrap.runtimes.filter((runtime) => runtime.name === "ops-runtime")).toHaveLength(1);
 
     await secondRuntime.stop();
   });
@@ -213,6 +294,7 @@ describe("daemon runtime", () => {
         nodeName: "ops-runtime",
         agentKey: "runtime_001",
         heartbeatIntervalMs: 15_000,
+        messagePollIntervalMs: 1_000,
         statePath: "/tmp/workpilot-agent-daemon/state.json",
         workspaceRoot: "/tmp/workpilot-agent-daemon/workspace"
       },
@@ -230,10 +312,10 @@ describe("daemon runtime", () => {
 
     await runtime.start();
 
-    expect(scheduler.intervalMs).toBe(15_000);
+    expect(scheduler.intervals).toEqual([1_000, 15_000]);
     expect(heartbeatCalls).toHaveLength(1);
 
-    await scheduler.tick();
+    await scheduler.tick(15_000);
 
     expect(heartbeatCalls).toHaveLength(2);
 
@@ -249,6 +331,82 @@ describe("daemon runtime", () => {
     expect(registeredRuntime?.status).toBe("online");
 
     await runtime.stop();
+  });
+
+  test("re-registers when the persisted runtime no longer exists before the first heartbeat", async () => {
+    const firstApp = createControlPlaneApp({
+      controlPlaneUrl: "http://control-plane.local"
+    });
+    const stateStore = new MemoryStateStore();
+    const registrationToken = await issueRegistrationToken(firstApp.fetch);
+
+    const firstRuntime = createDaemonRuntime(
+      {
+        controlPlaneUrl: "http://control-plane.local",
+        registrationToken,
+        nodeName: "ops-runtime",
+        agentKey: "runtime_001",
+        heartbeatIntervalMs: 15_000,
+        messagePollIntervalMs: 1_000,
+        statePath: "/tmp/workpilot-agent-daemon/state.json",
+        workspaceRoot: "/tmp/workpilot-agent-daemon/workspace"
+      },
+      {
+        fetcher: firstApp.fetch,
+        stateStore,
+        agentHost: new RecordingAgentHost(),
+        scheduler: new ManualScheduler()
+      }
+    );
+
+    await firstRuntime.start();
+    const persistedState = await stateStore.load();
+
+    expect(persistedState?.runtimeId).toBeDefined();
+
+    await firstRuntime.stop();
+
+    const secondApp = createControlPlaneApp({
+      controlPlaneUrl: "http://control-plane.local"
+    });
+    const replacementToken = await issueRegistrationToken(secondApp.fetch);
+    const secondHost = new RecordingAgentHost();
+
+    const secondRuntime = createDaemonRuntime(
+      {
+        controlPlaneUrl: "http://control-plane.local",
+        registrationToken: replacementToken,
+        nodeName: "ops-runtime",
+        agentKey: "runtime_001",
+        heartbeatIntervalMs: 15_000,
+        messagePollIntervalMs: 1_000,
+        statePath: "/tmp/workpilot-agent-daemon/state.json",
+        workspaceRoot: "/tmp/workpilot-agent-daemon/workspace"
+      },
+      {
+        fetcher: secondApp.fetch,
+        stateStore,
+        agentHost: secondHost,
+        scheduler: new ManualScheduler()
+      }
+    );
+
+    await expect(secondRuntime.start()).resolves.toBeUndefined();
+
+    const recoveredState = await stateStore.load();
+    expect(recoveredState?.runtimeId).toBeDefined();
+    expect(recoveredState?.runtimeId).not.toBe(persistedState?.runtimeId);
+    expect(secondHost.started).toBe(true);
+
+    const bootstrap = await secondRuntime.client.getWorkspaceBootstrap({
+      controlPlaneUrl: "http://control-plane.local",
+      fetcher: secondApp.fetch
+    });
+    const recoveredRuntime = bootstrap.runtimes.find((entry) => entry.id === recoveredState?.runtimeId);
+
+    expect(recoveredRuntime?.status).toBe("online");
+
+    await secondRuntime.stop();
   });
 
   test("syncs only current runtime agents and skips redundant host updates", async () => {
@@ -267,6 +425,7 @@ describe("daemon runtime", () => {
         nodeName: "ops-runtime",
         agentKey: "runtime_001",
         heartbeatIntervalMs: 30_000,
+        messagePollIntervalMs: 1_000,
         statePath: "/tmp/workpilot-agent-daemon/state.json",
         workspaceRoot: "/tmp/workpilot-agent-daemon/workspace"
       },
@@ -339,6 +498,7 @@ describe("daemon runtime", () => {
         nodeName: "ops-runtime",
         agentKey: "runtime_001",
         heartbeatIntervalMs: 30_000,
+        messagePollIntervalMs: 1_000,
         statePath: "/tmp/workpilot-agent-daemon/state.json",
         workspaceRoot: "/tmp/workpilot-agent-daemon/workspace"
       },
@@ -372,6 +532,7 @@ describe("daemon runtime", () => {
         nodeName: "ops-runtime",
         agentKey: "runtime_001",
         heartbeatIntervalMs: 30_000,
+        messagePollIntervalMs: 1_000,
         statePath: "/tmp/workpilot-agent-daemon/state.json",
         workspaceRoot: "/tmp/workpilot-agent-daemon/workspace"
       },
@@ -410,11 +571,12 @@ describe("daemon runtime", () => {
     expect(host.runCalls).toEqual([
       {
         agentId: createAgentPayload.agent.id,
-        prompt: "Implement the requested feature."
+        prompt: "Implement the requested feature.",
+        conversationKey: undefined
       }
     ]);
     expect(result).toEqual({
-      implementationPackage: "@rivet-dev/agent-os-codex-agent",
+      implementationPackage: "codex",
       responseText: "Reply from Coder: Implement the requested feature.",
       sessionId: "ses_demo"
     });
@@ -436,6 +598,7 @@ describe("daemon runtime", () => {
         nodeName: "ops-runtime",
         agentKey: "runtime_001",
         heartbeatIntervalMs: 30_000,
+        messagePollIntervalMs: 1_000,
         statePath: "/tmp/workpilot-agent-daemon/state.json",
         workspaceRoot: "/tmp/workpilot-agent-daemon/workspace"
       },
@@ -499,7 +662,7 @@ describe("daemon runtime", () => {
       })
     });
 
-    await scheduler.tick();
+    await scheduler.tick(30_000);
 
     expect(host.setStatusCalls).toContainEqual({
       agentId: createAgentPayload.agent.id,
@@ -535,6 +698,7 @@ describe("daemon runtime", () => {
         nodeName: "ops-runtime",
         agentKey: "runtime_001",
         heartbeatIntervalMs: 30_000,
+        messagePollIntervalMs: 1_000,
         statePath: "/tmp/workpilot-agent-daemon/state.json",
         workspaceRoot: "/tmp/workpilot-agent-daemon/workspace"
       },
@@ -599,19 +763,20 @@ describe("daemon runtime", () => {
       issue: { id: string };
     };
 
-    await scheduler.tick();
+    await scheduler.tick(30_000);
 
     expect(host.runCalls).toHaveLength(1);
     expect(host.runCalls[0]?.agentId).toBe(createAgentPayload.agent.id);
     expect(host.runCalls[0]?.prompt).toContain("Implement requested feature");
+    expect(host.runCalls[0]?.conversationKey).toBe(`issue:${issuePayload.issue.id}`);
 
-    const bootstrapResponse = await app.request("/bootstrap/workspace");
+    const bootstrapResponse = await app.request(`/bootstrap/workspace?organizationId=${TEST_ORG_ID}`);
     const bootstrapPayload = (await bootstrapResponse.json()) as {
       issues: Array<{ id: string; status: string }>;
       messages: Array<{ senderId: string; senderType: string; content: string }>;
     };
 
-    expect(bootstrapPayload.issues.find((issue) => issue.id === issuePayload.issue.id)?.status).toBe("done");
+    expect(bootstrapPayload.issues.find((issue) => issue.id === issuePayload.issue.id)?.status).toBe("in_review");
     expect(
       bootstrapPayload.messages.some(
         (message) =>
@@ -638,6 +803,7 @@ describe("daemon runtime", () => {
         nodeName: "ops-runtime",
         agentKey: "runtime_001",
         heartbeatIntervalMs: 30_000,
+        messagePollIntervalMs: 1_000,
         statePath: "/tmp/workpilot-agent-daemon/state.json",
         workspaceRoot: "/tmp/workpilot-agent-daemon/workspace"
       },
@@ -686,15 +852,16 @@ describe("daemon runtime", () => {
       message: { id: string };
     };
 
-    await scheduler.tick();
+    await scheduler.tick(1_000);
 
     expect(host.runCalls).toHaveLength(1);
     expect(host.runCalls[0]?.agentId).toBe(createAgentPayload.agent.id);
     expect(host.runCalls[0]?.prompt).toContain("Why did the deploy fail?");
     expect(host.runCalls[0]?.prompt).toContain("Authoritative agent profile for this conversation:");
     expect(host.runCalls[0]?.prompt).toContain("Answers direct engineering questions.");
+    expect(host.runCalls[0]?.conversationKey).toBe(`channel:${createAgentPayload.agent.channelId}`);
 
-    const bootstrapResponse = await app.request("/bootstrap/workspace");
+    const bootstrapResponse = await app.request(`/bootstrap/workspace?organizationId=${TEST_ORG_ID}`);
     const bootstrapPayload = (await bootstrapResponse.json()) as {
       messages: Array<{ id: string; channelId: string; senderId: string; senderType: string; content: string }>;
     };
@@ -727,6 +894,7 @@ describe("daemon runtime", () => {
         nodeName: "ops-runtime",
         agentKey: "runtime_001",
         heartbeatIntervalMs: 30_000,
+        messagePollIntervalMs: 1_000,
         statePath: "/tmp/workpilot-agent-daemon/state.json",
         workspaceRoot: "/tmp/workpilot-agent-daemon/workspace"
       },
@@ -772,7 +940,7 @@ describe("daemon runtime", () => {
       })
     });
 
-    await scheduler.tick();
+    await scheduler.tick(1_000);
 
     await app.request(`/channels/${createAgentPayload.agent.channelId}/messages`, {
       method: "POST",
@@ -786,11 +954,112 @@ describe("daemon runtime", () => {
       })
     });
 
-    await scheduler.tick();
+    await scheduler.tick(1_000);
 
     expect(host.runCalls).toHaveLength(2);
     expect(host.runCalls[0]?.prompt).toContain("Authoritative agent profile for this conversation:");
     expect(host.runCalls[1]?.prompt).not.toContain("Authoritative agent profile for this conversation:");
+    expect(host.runCalls[0]?.conversationKey).toBe(`channel:${createAgentPayload.agent.channelId}`);
+    expect(host.runCalls[1]?.conversationKey).toBe(`channel:${createAgentPayload.agent.channelId}`);
+
+    await runtime.stop();
+  });
+
+  test("uses separate conversation keys for direct chat and issue execution", async () => {
+    const app = createControlPlaneApp({
+      controlPlaneUrl: "http://control-plane.local"
+    });
+    const stateStore = new MemoryStateStore();
+    const host = new RecordingAgentHost();
+    const scheduler = new ManualScheduler();
+    const runtime = createDaemonRuntime(
+      {
+        controlPlaneUrl: "http://control-plane.local",
+        registrationToken: await issueRegistrationToken(app.fetch),
+        nodeName: "ops-runtime",
+        agentKey: "runtime_001",
+        heartbeatIntervalMs: 30_000,
+        messagePollIntervalMs: 1_000,
+        statePath: "/tmp/workpilot-agent-daemon/state.json",
+        workspaceRoot: "/tmp/workpilot-agent-daemon/workspace"
+      },
+      {
+        fetcher: app.fetch,
+        stateStore,
+        agentHost: host,
+        scheduler
+      }
+    );
+
+    await runtime.start();
+
+    const currentRuntimeId = (await stateStore.load())?.runtimeId;
+    const createAgentResponse = await app.request(`/runtimes/${currentRuntimeId}/agents`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        name: "Coder",
+        description: "Answers direct engineering questions.",
+        implementation: "codex",
+        model: "gpt-5.4",
+        reasoningEffort: "high"
+      })
+    });
+    const createAgentPayload = (await createAgentResponse.json()) as {
+      agent: AgentIdentity;
+    };
+
+    await runtime.refreshAgents();
+
+    await app.request(`/channels/${createAgentPayload.agent.channelId}/messages`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        content: "Direct question",
+        senderId: "usr_admin",
+        senderType: "user"
+      })
+    });
+
+    const issueSourceMessageResponse = await app.request("/channels/chn_general/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        content: "Please investigate the release failure.",
+        senderId: "usr_admin",
+        senderType: "user"
+      })
+    });
+    const issueSourceMessagePayload = (await issueSourceMessageResponse.json()) as {
+      message: { id: string };
+    };
+
+    const issueResponse = await app.request(`/messages/${issueSourceMessagePayload.message.id}/issues`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        actorId: "usr_admin",
+        assigneeId: createAgentPayload.agent.id,
+        title: "Investigate release failure"
+      })
+    });
+    const issuePayload = (await issueResponse.json()) as {
+      issue: { id: string };
+    };
+
+    await scheduler.tick(1_000);
+    await scheduler.tick(30_000);
+
+    expect(host.runCalls.some((call) => call.conversationKey === `channel:${createAgentPayload.agent.channelId}`)).toBe(true);
+    expect(host.runCalls.some((call) => call.conversationKey === `issue:${issuePayload.issue.id}`)).toBe(true);
 
     await runtime.stop();
   });
@@ -810,6 +1079,7 @@ describe("daemon runtime", () => {
         nodeName: "ops-runtime",
         agentKey: "runtime_001",
         heartbeatIntervalMs: 30_000,
+        messagePollIntervalMs: 1_000,
         statePath: "/tmp/workpilot-agent-daemon/state.json",
         workspaceRoot: "/tmp/workpilot-agent-daemon/workspace"
       },
@@ -856,7 +1126,7 @@ describe("daemon runtime", () => {
       })
     });
 
-    await scheduler.tick();
+    await scheduler.tick(1_000);
 
     expect(activityReporter.calls).toHaveLength(2);
     expect(activityReporter.calls[0]).toMatchObject({

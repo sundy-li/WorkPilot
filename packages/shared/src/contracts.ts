@@ -3,6 +3,7 @@ import type {
   AgentControlActionType,
   AgentLifecycleState,
   AgentProfile,
+  IssueActivityDTO,
   IssueDTO,
   RuntimeIssueClaim,
   AgentReasoningEffort,
@@ -23,6 +24,7 @@ export interface RuntimeIdentity {
   id: string;
   name: string;
   status: RuntimeDaemon["status"];
+  lastHeartbeatAt?: string | null;
 }
 
 export type AgentActivityStatus = "idle" | "running";
@@ -51,7 +53,17 @@ export interface ChannelSummary {
   id: string;
   type: "group" | "direct";
   name: string;
+  description?: string | null;
   unreadCount?: number;
+}
+
+export interface ChannelParticipantDTO {
+  participantId: string;
+  participantType: "user" | "agent";
+  displayName: string;
+  email?: string | null;
+  role?: AuthSession["role"] | null;
+  agentStatus?: AgentLifecycleState | null;
 }
 
 export interface RuntimeRegistrationCommand {
@@ -102,6 +114,7 @@ export interface RuntimeIssueClaimDTO {
   issue: IssueDTO;
   agent: AgentIdentity;
   sourceMessages: MessageDTO[];
+  issueActivities: IssueActivityDTO[];
 }
 
 export interface RuntimeAgentMessageClaimDTO {
@@ -117,6 +130,44 @@ export interface AgentMessageResponsePayload {
   occurredAt?: string;
 }
 
+export type AgentRunLogKind = "direct_message" | "issue";
+
+export interface AgentRunLogDTO {
+  id: string;
+  agentId: string;
+  runtimeId: string;
+  channelId: string | null;
+  issueId: string | null;
+  sessionId: string;
+  kind: AgentRunLogKind;
+  prompt: string;
+  response: string;
+  createdAt: string;
+}
+
+export interface AgentRunLogEventPayload {
+  agentId: string;
+  runtimeId: string;
+  channelId?: string | null;
+  issueId?: string | null;
+  sessionId: string;
+  kind: AgentRunLogKind;
+  prompt: string;
+  response: string;
+  occurredAt?: string;
+}
+
+export interface AgentWorkspaceFileSummaryDTO {
+  path: string;
+  kind: "file";
+  size: number;
+  updatedAt: string;
+}
+
+export interface AgentWorkspaceFileContentDTO extends AgentWorkspaceFileSummaryDTO {
+  content: string;
+}
+
 export interface WorkspaceBootstrapPayload {
   organization: {
     id: string;
@@ -125,6 +176,8 @@ export interface WorkspaceBootstrapPayload {
   runtimes: RuntimeIdentity[];
   agents: AgentIdentity[];
   agentActivities: AgentActivityDTO[];
+  agentRunLogs: AgentRunLogDTO[];
   messages: MessageDTO[];
   issues: IssueDTO[];
+  issueActivities: IssueActivityDTO[];
 }

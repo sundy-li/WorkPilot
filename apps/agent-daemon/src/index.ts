@@ -9,6 +9,7 @@ if (!config) {
   const runtime = createDaemonRuntime(config);
 
   await runtime.start();
+  const state = runtime.getState();
 
   const stop = async () => {
     await runtime.stop();
@@ -22,5 +23,7 @@ if (!config) {
     void stop();
   });
 
-  console.log(`Runtime ${config.nodeName} connected to ${config.controlPlaneUrl}.`);
+  console.log(
+    `Runtime ${config.nodeName} connected to ${config.controlPlaneUrl} as ${state?.runtimeId ?? "unknown-runtime"}.`
+  );
 }

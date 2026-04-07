@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { WorkspaceBootstrapPayload } from "@workpilot/shared";
+import { TEST_ORG_ID, type WorkspaceBootstrapPayload } from "@workpilot/shared";
 import type { ShellState } from "./shell-state";
 import {
   applyAgentDelete,
@@ -10,7 +10,7 @@ import {
 } from "./agent-thread-actions";
 
 const workspace: WorkspaceBootstrapPayload = {
-  organization: { id: "org_demo" },
+  organization: { id: TEST_ORG_ID },
   channels: [
     { id: "chn_general", type: "group", name: "all" },
     { id: "dir_admin_coder", type: "direct", name: "Ada x Coder" }
@@ -30,6 +30,7 @@ const workspace: WorkspaceBootstrapPayload = {
     }
   ],
   agentActivities: [],
+  agentRunLogs: [],
   messages: [
     {
       id: "msg_a",
@@ -50,6 +51,7 @@ const workspace: WorkspaceBootstrapPayload = {
       createdAt: "2025-01-01T00:01:00.000Z"
     }
   ],
+  issueActivities: [],
   issues: [
     {
       id: "iss_a",
@@ -62,6 +64,7 @@ const workspace: WorkspaceBootstrapPayload = {
       dueDate: null,
       project: null,
       sourceChannelId: "dir_admin_coder",
+      discussionChannelId: "ich_issue_a",
       createdAt: "2025-01-01T00:02:00.000Z",
       updatedAt: "2025-01-01T00:02:00.000Z"
     }
@@ -69,7 +72,7 @@ const workspace: WorkspaceBootstrapPayload = {
 };
 
 const shellState: ShellState = {
-  workspaceId: "org_demo",
+  workspaceId: TEST_ORG_ID,
   primaryView: "chat",
   activeTarget: {
     kind: "agent",

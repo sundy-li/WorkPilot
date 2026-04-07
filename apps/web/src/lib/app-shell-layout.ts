@@ -22,14 +22,14 @@ export function getChatPanelLayoutClasses() {
   };
 }
 
-export function getAgentWorkspaceLayoutClasses(mode: "chat" | "issues" | "profile") {
-  const isChat = mode === "chat";
+export function getAgentWorkspaceLayoutClasses(mode: "chat" | "issues" | "logs" | "memory" | "profile") {
+  const isFillHeight = mode === "chat" || mode === "logs" || mode === "memory";
 
   return {
-    viewport: isChat
+    viewport: isFillHeight
       ? "min-h-0 flex-1 overflow-hidden px-2 py-3 lg:px-3 lg:py-4"
       : "min-h-0 flex-1 overflow-y-auto px-2 py-3 lg:px-3 lg:py-4",
-    content: isChat ? "flex h-full min-h-0 flex-col gap-4" : "w-full space-y-4",
+    content: isFillHeight ? "flex h-full min-h-0 flex-col gap-4" : "w-full space-y-4",
     chatPanel: "min-h-0 flex-1 flex-col overflow-hidden rounded-[1.25rem] border border-neutral-200 bg-[var(--panel-elevated)] shadow-[0_10px_24px_rgba(15,23,42,0.05)]"
   };
 }

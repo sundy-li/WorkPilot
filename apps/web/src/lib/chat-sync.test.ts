@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import type { WorkspaceBootstrapPayload } from "@workpilot/shared";
+import { TEST_ORG_ID, type WorkspaceBootstrapPayload } from "@workpilot/shared";
 import { mergeChannelMessages, shouldPollCurrentChat } from "./chat-sync";
 
 const workspace: WorkspaceBootstrapPayload = {
-  organization: { id: "org_demo" },
+  organization: { id: TEST_ORG_ID },
   channels: [
     { id: "chn_general", type: "group", name: "all" },
     { id: "dir_admin_coder", type: "direct", name: "Ada x Coder" }
@@ -23,6 +23,7 @@ const workspace: WorkspaceBootstrapPayload = {
     }
   ],
   agentActivities: [],
+  agentRunLogs: [],
   messages: [
     {
       id: "msg_1",
@@ -43,6 +44,7 @@ const workspace: WorkspaceBootstrapPayload = {
       createdAt: "2025-04-03T22:18:08.000Z"
     }
   ],
+  issueActivities: [],
   issues: []
 };
 

@@ -1,4 +1,4 @@
-export type AgentBrowserMode = "chat" | "issues" | "profile";
+export type AgentBrowserMode = "chat" | "issues" | "logs" | "memory" | "profile";
 
 export interface AgentWorkspaceBrowserState {
   agentId: string | null;

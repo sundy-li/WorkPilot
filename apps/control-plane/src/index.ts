@@ -2,7 +2,6 @@ import { config as loadEnv } from "dotenv";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createControlPlaneApp } from "./app";
-import { getConfiguredDatabaseUrl } from "./storage/config";
 import { createPostgresControlPlaneStorage, getRequiredDatabaseUrl } from "./storage/postgres";
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
@@ -10,17 +9,11 @@ loadEnv({ path: resolve(currentDir, "../../../.env") });
 loadEnv({ path: resolve(currentDir, "../.env"), override: false });
 
 const port = Number(process.env.PORT ?? 3001);
-const databaseUrl = getConfiguredDatabaseUrl(process.env);
-const storage = databaseUrl
-  ? await createPostgresControlPlaneStorage({
-      databaseUrl: getRequiredDatabaseUrl(process.env)
-    })
-  : undefined;
+const storage = await createPostgresControlPlaneStorage({
+  databaseUrl: getRequiredDatabaseUrl(process.env)
+});
 
-if (storage) {
-  await storage.initialize();
-  await storage.seedDemoWorkspace();
-}
+await storage.initialize();
 
 const app = createControlPlaneApp({
   controlPlaneUrl: process.env.CONTROL_PLANE_URL,
@@ -29,7 +22,8 @@ const app = createControlPlaneApp({
 
 export default {
   port,
-  fetch: app.fetch
+  fetch: app.fetch,
+  idleTimeout: 60
 };
 
 console.log(`WorkPilot control-plane listening on http://localhost:${port}`);

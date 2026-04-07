@@ -2,11 +2,17 @@ import { describe, expect, test } from "bun:test";
 import { createAgentDraftForImplementation, getAgentImplementationDefinition } from "./agent-catalog";
 
 describe("agent catalog", () => {
-  test("describes codex as an agent-os registry implementation", () => {
+  test("describes codex as an agent-os host agent implementation", () => {
     expect(getAgentImplementationDefinition("codex")).toMatchObject({
       id: "codex",
-      packageName: "@rivet-dev/agent-os-codex-agent",
+      packageName: "codex",
       defaultModel: "gpt-5.4"
+    });
+  });
+
+  test("uses the canonical claude opus model id in the shared catalog", () => {
+    expect(getAgentImplementationDefinition("claude")).toMatchObject({
+      defaultModel: "default"
     });
   });
 

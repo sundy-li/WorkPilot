@@ -31,7 +31,7 @@ export function createControlPlaneApp(options: CreateControlPlaneAppOptions = {}
         user: {
           id: "usr_admin",
           email: body.email,
-          organizationId: "org_demo"
+          organizationId: ""
         }
       },
       201
@@ -62,6 +62,26 @@ export function createControlPlaneApp(options: CreateControlPlaneAppOptions = {}
     return context.json({ session: await storage.getDemoSession() });
   });
 
+  app.get("/workspaces", async (context) => {
+    const userId = context.req.query("userId");
+    if (!userId) {
+      return context.json({ error: "userId is required." }, 400);
+    }
+    return context.json({ workspaces: await storage.getWorkspacesForUser(userId) });
+  });
+
+  app.post("/workspaces", async (context) => {
+    const body = (await context.req.json()) as { userId: string; name: string; description?: string };
+
+    try {
+      const workspace = await storage.createWorkspace(body);
+      return context.json({ workspace }, 201);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error.";
+      return context.json({ error: message }, 400);
+    }
+  });
+
   app.get("/organizations/:orgId", async (context) => {
     const organization = await storage.getOrganization(context.req.param("orgId"));
     if (!organization) {
@@ -79,12 +99,23 @@ export function createControlPlaneApp(options: CreateControlPlaneAppOptions = {}
   });
 
   app.post("/organizations/:orgId/channels", async (context) => {
-    const body = (await context.req.json()) as { name: string };
+    const body = (await context.req.json()) as {
+      name: string;
+      description?: string;
+      actorId?: string;
+      members?: Array<{
+        participantId: string;
+        participantType: "user" | "agent";
+      }>;
+    };
 
     try {
       const channel = await storage.createChannel({
         organizationId: context.req.param("orgId"),
-        name: body.name
+        name: body.name,
+        description: body.description,
+        actorId: body.actorId,
+        members: body.members
       });
       return context.json({ channel }, 201);
     } catch (error) {
@@ -96,23 +127,51 @@ export function createControlPlaneApp(options: CreateControlPlaneAppOptions = {}
 
   app.get("/channels/:channelId/messages", async (context) => {
     const channelId = context.req.param("channelId");
-    const organizationId = context.req.query("organizationId") ?? "org_demo";
-    const messages = await storage.getMessages({
-      channelId,
-      after: context.req.query("after") ?? undefined
-    });
-    const channel = await storage.getChannel(channelId);
+    const after = context.req.query("after") ?? undefined;
+    const [messages, channel, channelAgents, agentRunLogs] = await Promise.all([
+      storage.getMessages({ channelId, after }),
+      storage.getChannel(channelId),
+      storage.getAgentsForChannel(channelId),
+      storage.getAgentRunLogsForChannel(channelId, after)
+    ]);
     if (!channel) {
       return context.json({ error: "Channel not found." }, 404);
     }
-    const workspace = await storage.getWorkspaceBootstrap(organizationId);
-    const channelAgentIds = new Set(
-      workspace.agents.filter((agent) => agent.channelId === channelId).map((agent) => agent.id)
-    );
+    const agentIds = channelAgents.map((a) => a.id);
+    const agentActivities = await storage.getAgentActivitiesForAgents(agentIds);
     return context.json({
       messages,
-      agentActivities: workspace.agentActivities.filter((activity) => channelAgentIds.has(activity.agentId))
+      agentActivities,
+      agentRunLogs
     });
+  });
+
+  app.get("/channels/:channelId/participants", async (context) => {
+    try {
+      const participants = await storage.getChannelParticipants(context.req.param("channelId"));
+      return context.json({ participants });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error.";
+      const status = message === "Channel not found." ? 404 : 400;
+      return context.json({ error: message }, status);
+    }
+  });
+
+  app.patch("/channels/:channelId", async (context) => {
+    const body = (await context.req.json()) as { name: string; description?: string };
+
+    try {
+      const channel = await storage.updateChannel({
+        channelId: context.req.param("channelId"),
+        name: body.name,
+        description: body.description
+      });
+      return context.json({ channel });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error.";
+      const status = message === "Channel not found." ? 404 : 400;
+      return context.json({ error: message }, status);
+    }
   });
 
   app.get("/organizations/:orgId/runtimes", async (context) => {
@@ -134,7 +193,15 @@ export function createControlPlaneApp(options: CreateControlPlaneAppOptions = {}
   });
 
   app.get("/bootstrap/workspace", async (context) => {
-    const organizationId = context.req.query("organizationId") ?? "org_demo";
+    const runtimeId = context.req.query("runtimeId");
+    if (runtimeId) {
+      return context.json(await storage.getWorkspaceBootstrapForRuntime(runtimeId));
+    }
+
+    const organizationId = context.req.query("organizationId");
+    if (!organizationId) {
+      return context.json({ error: "organizationId is required." }, 400);
+    }
     return context.json(await storage.getWorkspaceBootstrap(organizationId));
   });
 
@@ -357,6 +424,7 @@ export function createControlPlaneApp(options: CreateControlPlaneAppOptions = {}
 
   app.patch("/issues/:issueId", async (context) => {
     const body = (await context.req.json()) as {
+      actorId: string;
       status?: "backlog" | "todo" | "in_progress" | "in_review" | "done";
       assigneeId?: string | null;
       title?: string;
@@ -369,6 +437,7 @@ export function createControlPlaneApp(options: CreateControlPlaneAppOptions = {}
     try {
       const issue = await storage.updateIssue({
         issueId: context.req.param("issueId"),
+        actorId: body.actorId,
         status: body.status,
         assigneeId: body.assigneeId,
         title: body.title,
@@ -378,6 +447,57 @@ export function createControlPlaneApp(options: CreateControlPlaneAppOptions = {}
         project: body.project
       });
       return context.json({ issue });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error.";
+      const status = message === "Issue was not found." ? 404 : 400;
+      return context.json({ error: message }, status);
+    }
+  });
+
+  app.get("/issues/:issueId/activities", async (context) => {
+    try {
+      const activities = await storage.getIssueActivities(context.req.param("issueId"));
+      return context.json({ activities });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error.";
+      const status = message === "Issue was not found." ? 404 : 400;
+      return context.json({ error: message }, status);
+    }
+  });
+
+  app.delete("/issues/:issueId", async (context) => {
+    const body = (await context.req.json().catch(() => ({}))) as { actorId?: string };
+
+    try {
+      const result = await storage.deleteIssue({
+        issueId: context.req.param("issueId"),
+        actorId: body.actorId ?? "system"
+      });
+      return context.json(result);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error.";
+      const status = message === "Issue was not found." ? 404 : 400;
+      return context.json({ error: message }, status);
+    }
+  });
+
+  app.post("/issues/:issueId/comments", async (context) => {
+    const body = (await context.req.json()) as {
+      actorId: string;
+      actorType?: "user" | "agent" | "system";
+      message: string;
+      occurredAt?: string;
+    };
+
+    try {
+      const activity = await storage.createIssueComment({
+        issueId: context.req.param("issueId"),
+        actorId: body.actorId,
+        actorType: body.actorType ?? "user",
+        message: body.message,
+        occurredAt: body.occurredAt
+      });
+      return context.json({ activity }, 201);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error.";
       const status = message === "Issue was not found." ? 404 : 400;
@@ -458,6 +578,45 @@ export function createControlPlaneApp(options: CreateControlPlaneAppOptions = {}
     });
   });
 
+  app.post("/runtime/responses/pull", async (context) => {
+    const body = (await context.req.json()) as { runtimeId: string };
+
+    const agentIds = await storage.getAgentIdsForRuntime(body.runtimeId);
+    if (agentIds.length === 0) {
+      return context.json({ responses: [] });
+    }
+
+    const allResponses = await Promise.all(
+      agentIds.map((agentId) => storage.getPendingAgentResponses(agentId))
+    );
+
+    return context.json({ responses: allResponses.flat() });
+  });
+
+  app.post("/runtime/responses/:responseId/claim", async (context) => {
+    const body = (await context.req.json()) as { agentId: string };
+
+    try {
+      const response = await storage.claimAgentResponse(context.req.param("responseId"), body.agentId);
+      return context.json({ response });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error.";
+      return context.json({ error: message }, 400);
+    }
+  });
+
+  app.post("/runtime/responses/:responseId/complete", async (context) => {
+    const body = (await context.req.json()) as { content: string; agentId: string };
+
+    try {
+      await storage.completeAgentResponse(context.req.param("responseId"));
+      return context.json({ ok: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error.";
+      return context.json({ error: message }, 400);
+    }
+  });
+
   app.post("/runtime/messages/pull", async (context) => {
     const body = (await context.req.json()) as { runtimeId: string; limit?: number; occurredAt?: string };
 
@@ -508,6 +667,81 @@ export function createControlPlaneApp(options: CreateControlPlaneAppOptions = {}
     }
   });
 
+  app.post("/agent/run-logs", async (context) => {
+    const body = (await context.req.json()) as {
+      agentId: string;
+      runtimeId: string;
+      channelId?: string | null;
+      issueId?: string | null;
+      sessionId: string;
+      kind: "direct_message" | "issue";
+      prompt: string;
+      response: string;
+      occurredAt?: string;
+    };
+
+    try {
+      const result = await storage.recordAgentRunLog(body);
+      return context.json(result, 201);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error.";
+      const status = message === "Agent was not found." ? 404 : 400;
+      return context.json({ error: message }, status);
+    }
+  });
+
+  app.post("/agent/workspace-files", async (context) => {
+    const body = (await context.req.json()) as {
+      agentId: string;
+      files: Array<{
+        path: string;
+        kind: "file";
+        size: number;
+        updatedAt: string;
+        content: string;
+      }>;
+    };
+
+    try {
+      const result = await storage.syncAgentWorkspaceFiles(body);
+      return context.json(result, 201);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error.";
+      const status = message === "Agent was not found." ? 404 : 400;
+      return context.json({ error: message }, status);
+    }
+  });
+
+  app.get("/agents/:agentId/workspace-files", async (context) => {
+    try {
+      const files = await storage.listAgentWorkspaceFiles(context.req.param("agentId"));
+      return context.json({ files });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error.";
+      const status = message === "Agent was not found." ? 404 : 400;
+      return context.json({ error: message }, status);
+    }
+  });
+
+  app.get("/agents/:agentId/workspace-files/content", async (context) => {
+    try {
+      const file = await storage.getAgentWorkspaceFile(
+        context.req.param("agentId"),
+        context.req.query("path") ?? ""
+      );
+
+      if (!file) {
+        return context.json({ error: "Workspace file not found." }, 404);
+      }
+
+      return context.json({ file });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error.";
+      const status = message === "Agent was not found." ? 404 : 400;
+      return context.json({ error: message }, status);
+    }
+  });
+
   app.post("/agent/message-events", async (context) => {
     const body = (await context.req.json()) as {
       agentId: string;
@@ -529,6 +763,87 @@ export function createControlPlaneApp(options: CreateControlPlaneAppOptions = {}
           : 400;
       return context.json({ error: message }, status);
     }
+  });
+
+  app.get("/organizations/:orgId/permissions", async (context) => {
+    const orgId = context.req.param("orgId");
+    const userId = context.req.query("userId") ?? undefined;
+    const permissions = await storage.getWorkspacePermissions(orgId, userId);
+    return context.json({ permissions });
+  });
+
+  app.post("/organizations/:orgId/permissions", async (context) => {
+    const body = (await context.req.json()) as {
+      userId: string;
+      resourceType: "runtime" | "agent" | "channel";
+      resourceId: string;
+      permission: "read" | "write" | "admin";
+      grantedBy: string;
+    };
+
+    try {
+      const permission = await storage.grantPermission({
+        organizationId: context.req.param("orgId"),
+        ...body
+      });
+      return context.json({ permission }, 201);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error.";
+      return context.json({ error: message }, 400);
+    }
+  });
+
+  app.delete("/permissions/:permissionId", async (context) => {
+    try {
+      await storage.revokePermission({ permissionId: context.req.param("permissionId") });
+      return context.json({ ok: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error.";
+      return context.json({ error: message }, 400);
+    }
+  });
+
+  app.get("/organizations/:orgId/invitations", async (context) => {
+    const invitations = await storage.getWorkspaceInvitations(context.req.param("orgId"));
+    return context.json({ invitations });
+  });
+
+  app.post("/organizations/:orgId/invitations", async (context) => {
+    const body = (await context.req.json()) as {
+      email: string;
+      role: "owner" | "admin" | "member";
+      invitedBy: string;
+    };
+
+    try {
+      const invitation = await storage.createWorkspaceInvitation({
+        organizationId: context.req.param("orgId"),
+        email: body.email,
+        role: body.role,
+        invitedBy: body.invitedBy
+      });
+      return context.json({ invitation }, 201);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error.";
+      return context.json({ error: message }, 400);
+    }
+  });
+
+  app.post("/invitations/:token/accept", async (context) => {
+    const body = (await context.req.json()) as { userId: string };
+
+    try {
+      await storage.acceptWorkspaceInvitation(context.req.param("token"), body.userId);
+      return context.json({ ok: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error.";
+      return context.json({ error: message }, 400);
+    }
+  });
+
+  app.get("/organizations/:orgId/members", async (context) => {
+    const members = await storage.getOrganizationMembers(context.req.param("orgId"));
+    return context.json({ members });
   });
 
   return app;

@@ -14,7 +14,7 @@ const AGENT_IMPLEMENTATION_DEFINITIONS: AgentImplementationDefinition[] = [
   {
     id: "codex",
     label: "Codex CLI",
-    packageName: "@rivet-dev/agent-os-codex-agent",
+    packageName: "codex",
     defaultModel: "gpt-5.4",
     models: ["gpt-5.4", "gpt-5", "gpt-4.1"],
     defaultReasoningEffort: "medium",
@@ -23,27 +23,27 @@ const AGENT_IMPLEMENTATION_DEFINITIONS: AgentImplementationDefinition[] = [
   {
     id: "claude",
     label: "Claude",
-    packageName: "@rivet-dev/agent-os-claude",
-    defaultModel: "claude-sonnet-4.5",
-    models: ["claude-sonnet-4.5", "claude-opus-4.1", "claude-haiku-3.5"],
+    packageName: "claude",
+    defaultModel: "default",
+    models: ["default", "sonnet[1m]", "opus[1m]", "haiku", "claude-opus-4-6"],
     defaultReasoningEffort: "medium",
     notes: "Strong general-purpose planning and synthesis."
   },
   {
     id: "opencode",
     label: "OpenCode",
-    packageName: "@rivet-dev/agent-os-opencode",
+    packageName: "opencode",
     defaultModel: "gpt-5",
-    models: ["gpt-5", "claude-sonnet-4.5", "gemini-2.5-pro"],
+    models: ["gpt-5", "claude-opus-4-6", "gemini-2.5-pro"],
     defaultReasoningEffort: "medium",
     notes: "Flexible OSS-oriented runtime wrapper."
   },
   {
     id: "pi",
     label: "Pi",
-    packageName: "@rivet-dev/agent-os-pi",
+    packageName: "pi",
     defaultModel: "claude-sonnet-4.5",
-    models: ["claude-sonnet-4.5", "gpt-5", "claude-opus-4.1"],
+    models: ["claude-opus-4-6", "gpt-5", "claude-opus-4.1"],
     defaultReasoningEffort: "medium",
     notes: "Good default when you want a generic coding agent."
   }

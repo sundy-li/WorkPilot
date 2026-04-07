@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import type { ChannelSummary } from "@workpilot/shared";
+import { TEST_ORG_ID, type ChannelSummary } from "@workpilot/shared";
 import {
   createInitialShellState,
   getChannelDisplayName,
+  reconcileInvalidActiveTarget,
   selectConversationTarget,
   selectPrimaryView,
   selectWorkspace
@@ -30,7 +31,7 @@ describe("shell state", () => {
       },
       detailOpen: false,
       primaryView: "chat",
-      workspaceId: "org_demo"
+      workspaceId: ""
     });
     expect(getChannelDisplayName(channels[0])).toBe("all");
   });
@@ -43,7 +44,7 @@ describe("shell state", () => {
       },
       detailOpen: true,
       primaryView: "chat" as const,
-      workspaceId: "org_demo"
+      workspaceId: TEST_ORG_ID
     };
 
     expect(selectConversationTarget(current, { kind: "agent", id: "agt_seed" })).toEqual({
@@ -53,7 +54,7 @@ describe("shell state", () => {
       },
       detailOpen: false,
       primaryView: "chat",
-      workspaceId: "org_demo"
+      workspaceId: TEST_ORG_ID
     });
   });
 
@@ -65,7 +66,7 @@ describe("shell state", () => {
       },
       detailOpen: true,
       primaryView: "chat" as const,
-      workspaceId: "org_demo"
+      workspaceId: TEST_ORG_ID
     };
 
     expect(selectPrimaryView(current, "runtimes")).toEqual({
@@ -75,7 +76,7 @@ describe("shell state", () => {
       },
       detailOpen: false,
       primaryView: "runtimes",
-      workspaceId: "org_demo"
+      workspaceId: TEST_ORG_ID
     });
   });
 
@@ -87,7 +88,7 @@ describe("shell state", () => {
       },
       detailOpen: true,
       primaryView: "chat" as const,
-      workspaceId: "org_demo"
+      workspaceId: TEST_ORG_ID
     };
 
     expect(selectPrimaryView(current, "agents")).toEqual({
@@ -97,7 +98,7 @@ describe("shell state", () => {
       },
       detailOpen: false,
       primaryView: "agents",
-      workspaceId: "org_demo"
+      workspaceId: TEST_ORG_ID
     });
   });
 
@@ -109,7 +110,7 @@ describe("shell state", () => {
       },
       detailOpen: true,
       primaryView: "chat" as const,
-      workspaceId: "org_demo"
+      workspaceId: TEST_ORG_ID
     };
 
     expect(selectPrimaryView(current, "kanban")).toEqual({
@@ -119,7 +120,7 @@ describe("shell state", () => {
       },
       detailOpen: false,
       primaryView: "kanban",
-      workspaceId: "org_demo"
+      workspaceId: TEST_ORG_ID
     });
   });
 
@@ -131,7 +132,7 @@ describe("shell state", () => {
       },
       detailOpen: true,
       primaryView: "chat" as const,
-      workspaceId: "org_demo"
+      workspaceId: TEST_ORG_ID
     };
 
     expect(selectPrimaryView(current, "settings")).toEqual({
@@ -141,7 +142,7 @@ describe("shell state", () => {
       },
       detailOpen: false,
       primaryView: "settings",
-      workspaceId: "org_demo"
+      workspaceId: TEST_ORG_ID
     });
   });
 
@@ -153,7 +154,7 @@ describe("shell state", () => {
       },
       detailOpen: true,
       primaryView: "runtimes" as const,
-      workspaceId: "org_demo"
+      workspaceId: TEST_ORG_ID
     };
 
     expect(selectWorkspace(current, "org_ops_lab", channels)).toEqual({
@@ -164,6 +165,42 @@ describe("shell state", () => {
       detailOpen: false,
       primaryView: "chat",
       workspaceId: "org_ops_lab"
+    });
+  });
+
+  test("keeps runtimes view when the active chat target is missing", () => {
+    const current = {
+      activeTarget: {
+        id: "chn_missing",
+        kind: "channel" as const
+      },
+      detailOpen: false,
+      primaryView: "runtimes" as const,
+      workspaceId: TEST_ORG_ID
+    };
+
+    expect(reconcileInvalidActiveTarget(current, channels, [])).toEqual(current);
+  });
+
+  test("resets to the default chat target only when chat view has an invalid target", () => {
+    const current = {
+      activeTarget: {
+        id: "chn_missing",
+        kind: "channel" as const
+      },
+      detailOpen: false,
+      primaryView: "chat" as const,
+      workspaceId: TEST_ORG_ID
+    };
+
+    expect(reconcileInvalidActiveTarget(current, channels, [])).toEqual({
+      activeTarget: {
+        id: "chn_general",
+        kind: "channel"
+      },
+      detailOpen: false,
+      primaryView: "chat",
+      workspaceId: TEST_ORG_ID
     });
   });
 });

@@ -37,6 +37,21 @@ describe("workspace browser", () => {
     });
   });
 
+  test("supports switching the agent workspace into logs mode", () => {
+    expect(
+      setAgentWorkspaceMode(
+        {
+          agentId: "agt_seed",
+          mode: "chat"
+        },
+        "logs"
+      )
+    ).toEqual({
+      agentId: "agt_seed",
+      mode: "logs"
+    });
+  });
+
   test("runtime workspace stores the selected runtime", () => {
     expect(createInitialRuntimeWorkspaceBrowserState("rtm_seed")).toEqual({
       runtimeId: "rtm_seed"

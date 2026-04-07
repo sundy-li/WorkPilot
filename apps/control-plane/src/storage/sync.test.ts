@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { TEST_ORG_ID } from "@workpilot/shared";
 import { SQL } from "bun";
 import { createPostgresControlPlaneStorage } from "./postgres";
 import { syncPostgresDatabase } from "./sync";
@@ -15,8 +16,8 @@ test("syncPostgresDatabase is idempotent and preserves existing data", async () 
     await storage.initialize();
     await storage.seedDemoWorkspace();
 
-    const beforeSync = await storage.getWorkspaceBootstrap("org_demo");
-    expect(beforeSync.organization?.id).toBe("org_demo");
+    const beforeSync = await storage.getWorkspaceBootstrap(TEST_ORG_ID);
+    expect(beforeSync.organization?.id).toBe(TEST_ORG_ID);
     expect(beforeSync.channels.length).toBeGreaterThan(0);
 
     await syncPostgresDatabase({
@@ -28,8 +29,8 @@ test("syncPostgresDatabase is idempotent and preserves existing data", async () 
       schema
     });
 
-    const afterSync = await storage.getWorkspaceBootstrap("org_demo");
-    expect(afterSync.organization?.id).toBe("org_demo");
+    const afterSync = await storage.getWorkspaceBootstrap(TEST_ORG_ID);
+    expect(afterSync.organization?.id).toBe(TEST_ORG_ID);
     expect(afterSync.channels.length).toBe(beforeSync.channels.length);
   } finally {
     await storage.dispose();

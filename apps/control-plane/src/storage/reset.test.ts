@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { TEST_ORG_ID } from "@workpilot/shared";
 import { createPostgresControlPlaneStorage } from "./postgres";
 import { resetPostgresDatabase } from "./reset";
 
@@ -14,8 +15,8 @@ test("resetPostgresDatabase recreates tables and removes existing data", async (
     await storage.initialize();
     await storage.seedDemoWorkspace();
 
-    const beforeReset = await storage.getWorkspaceBootstrap("org_demo");
-    expect(beforeReset.organization?.id).toBe("org_demo");
+    const beforeReset = await storage.getWorkspaceBootstrap(TEST_ORG_ID);
+    expect(beforeReset.organization?.id).toBe(TEST_ORG_ID);
     expect(beforeReset.channels.length).toBeGreaterThan(0);
 
     await resetPostgresDatabase({
@@ -23,7 +24,7 @@ test("resetPostgresDatabase recreates tables and removes existing data", async (
       schema
     });
 
-    const afterReset = await storage.getWorkspaceBootstrap("org_demo");
+    const afterReset = await storage.getWorkspaceBootstrap(TEST_ORG_ID);
     expect(afterReset.organization).toBeNull();
     expect(afterReset.channels).toEqual([]);
     expect(afterReset.runtimes).toEqual([]);

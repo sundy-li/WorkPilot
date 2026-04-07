@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { TEST_ORG_ID } from "@workpilot/shared";
 import { createPostgresControlPlaneStorage } from "./postgres";
 
 const cleanupCallbacks: Array<() => Promise<void>> = [];
@@ -23,9 +24,9 @@ describe("postgres control-plane storage", () => {
     await storage.initialize();
     await storage.seedDemoWorkspace();
 
-    const workspace = await storage.getWorkspaceBootstrap("org_demo");
+    const workspace = await storage.getWorkspaceBootstrap(TEST_ORG_ID);
 
-    expect(workspace.organization?.id).toBe("org_demo");
+    expect(workspace.organization?.id).toBe(TEST_ORG_ID);
     expect(workspace.runtimes.length).toBeGreaterThan(0);
     expect(workspace.agents.length).toBeGreaterThan(0);
     expect(workspace.messages.length).toBeGreaterThan(0);
@@ -42,7 +43,7 @@ describe("postgres control-plane storage", () => {
     await storage.seedDemoWorkspace();
 
     const command = await storage.createRuntimeRegistrationCommand({
-      organizationId: "org_demo",
+      organizationId: TEST_ORG_ID,
       actorId: "usr_admin",
       actorRole: "admin",
       controlPlaneUrl: "http://localhost:3001"
@@ -67,7 +68,7 @@ describe("postgres control-plane storage", () => {
       reasoningEffort: "medium"
     });
 
-    const workspace = await storage.getWorkspaceBootstrap("org_demo");
+    const workspace = await storage.getWorkspaceBootstrap(TEST_ORG_ID);
 
     expect(workspace.runtimes.some((entry) => entry.id === runtime.id)).toBe(true);
     expect(workspace.agents.some((entry) => entry.id === agent.id && entry.runtimeId === runtime.id)).toBe(true);
@@ -91,7 +92,7 @@ describe("postgres control-plane storage", () => {
     await storage.seedDemoWorkspace();
 
     const command = await storage.createRuntimeRegistrationCommand({
-      organizationId: "org_demo",
+      organizationId: TEST_ORG_ID,
       actorId: "usr_admin",
       actorRole: "admin",
       controlPlaneUrl: "http://localhost:3001"
@@ -118,6 +119,34 @@ describe("postgres control-plane storage", () => {
         runtimeKey: "runtime_db_002"
       })
     ).rejects.toThrow("Registration token has already been used.");
+  });
+
+  test("creates channels with empty description and multiple participants in postgres", async () => {
+    const storage = await createPostgresControlPlaneStorage({
+      databaseUrl: process.env.DATABASE_URL ?? "postgres://sundy:sundy@127.0.0.1:5432/sundy",
+      schema: createTestSchemaName()
+    });
+    cleanupCallbacks.push(() => storage.dispose());
+
+    await storage.initialize();
+    await storage.seedDemoWorkspace();
+
+    const channel = await storage.createChannel({
+      organizationId: TEST_ORG_ID,
+      name: "dev",
+      description: "",
+      actorId: "usr_admin",
+      members: [
+        { participantId: "agt_seed", participantType: "agent" },
+        { participantId: "usr_member", participantType: "user" }
+      ]
+    });
+
+    expect(channel.name).toBe("dev");
+    expect(channel.description).toBeNull();
+
+    const workspace = await storage.getWorkspaceBootstrap(TEST_ORG_ID);
+    expect(workspace.channels.some((entry) => entry.id === channel.id && entry.description === null)).toBe(true);
   });
 
   test("persists agent control actions and issue claims in postgres", async () => {
@@ -197,6 +226,46 @@ describe("postgres control-plane storage", () => {
     expect(completion.message?.senderType).toBe("agent");
   });
 
+  test("hides issue discussion channels from visible channel lists in postgres", async () => {
+    const storage = await createPostgresControlPlaneStorage({
+      databaseUrl: process.env.DATABASE_URL ?? "postgres://sundy:sundy@127.0.0.1:5432/sundy",
+      schema: createTestSchemaName()
+    });
+    cleanupCallbacks.push(() => storage.dispose());
+
+    await storage.initialize();
+    await storage.seedDemoWorkspace();
+
+    const issue = await storage.createIssueFromMessage({
+      messageId: "msg_seed",
+      actorId: "usr_admin",
+      assigneeId: "agt_seed",
+      title: "Triage deployment issue"
+    });
+
+    await storage.recordAgentIssueEvent({
+      agentId: "agt_seed",
+      issueId: issue.id,
+      status: "in_review",
+      message: "@usr_admin Fixed and ready for review."
+    });
+
+    const channels = await storage.getChannels(TEST_ORG_ID);
+    expect(channels.some((channel) => channel.id === issue.discussionChannelId)).toBe(false);
+    expect(channels.some((channel) => channel.name.startsWith("issue-"))).toBe(false);
+
+    const workspace = await storage.getWorkspaceBootstrap(TEST_ORG_ID);
+    expect(workspace.channels.some((channel) => channel.id === issue.discussionChannelId)).toBe(false);
+    expect(
+      workspace.messages.some(
+        (message) => message.channelId === issue.discussionChannelId && message.content.includes("ready for review")
+      )
+    ).toBe(true);
+
+    const directMessages = await storage.getMessages({ channelId: "dir_admin_ops" });
+    expect(directMessages.some((message) => message.content.includes("ready for review"))).toBe(false);
+  });
+
   test("persists direct-thread message claims and agent replies in postgres", async () => {
     const storage = await createPostgresControlPlaneStorage({
       databaseUrl: process.env.DATABASE_URL ?? "postgres://sundy:sundy@127.0.0.1:5432/sundy",
@@ -246,7 +315,7 @@ describe("postgres control-plane storage", () => {
     await storage.seedDemoWorkspace();
 
     const command = await storage.createRuntimeRegistrationCommand({
-      organizationId: "org_demo",
+      organizationId: TEST_ORG_ID,
       actorId: "usr_admin",
       actorRole: "admin",
       controlPlaneUrl: "http://localhost:3001"

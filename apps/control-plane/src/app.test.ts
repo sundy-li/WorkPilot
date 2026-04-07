@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { TEST_ORG_ID } from "@workpilot/shared";
 import { createControlPlaneApp } from "./app";
 
 describe("control-plane app", () => {
@@ -42,13 +43,55 @@ describe("control-plane app", () => {
     };
 
     expect(payload.session.userId).toBe("usr_admin");
-    expect(payload.session.organizationId).toBe("org_demo");
+    expect(payload.session.organizationId).toBe(TEST_ORG_ID);
+  });
+
+  test("lists workspaces for a user and allows creating the first workspace", async () => {
+    const app = createControlPlaneApp();
+
+    const listBeforeResponse = await app.request("/workspaces?userId=usr_fresh");
+    expect(listBeforeResponse.status).toBe(200);
+    const listBeforePayload = (await listBeforeResponse.json()) as {
+      workspaces: Array<{ id: string; name: string; slug: string }>;
+    };
+    expect(listBeforePayload.workspaces).toEqual([]);
+
+    const createResponse = await app.request("/workspaces", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        userId: "usr_fresh",
+        name: "Release"
+      })
+    });
+
+    expect(createResponse.status).toBe(201);
+    const createPayload = (await createResponse.json()) as {
+      workspace: { id: string; name: string; slug: string };
+    };
+    expect(createPayload.workspace.slug).toBe("release");
+
+    const listAfterResponse = await app.request("/workspaces?userId=usr_fresh");
+    const listAfterPayload = (await listAfterResponse.json()) as {
+      workspaces: Array<{ id: string; name: string; slug: string }>;
+    };
+    expect(listAfterPayload.workspaces).toContainEqual(createPayload.workspace);
+
+    const bootstrapResponse = await app.request(`/bootstrap/workspace?organizationId=${encodeURIComponent(createPayload.workspace.id)}`);
+    const bootstrapPayload = (await bootstrapResponse.json()) as {
+      organization: { id: string } | null;
+      channels: Array<{ id: string; name: string }>;
+    };
+    expect(bootstrapPayload.organization?.id).toBe(createPayload.workspace.id);
+    expect(bootstrapPayload.channels.find((channel) => channel.name === "all")?.id).toBe("chn_release_general");
   });
 
   test("allows admins to generate node registration tokens and rejects members", async () => {
     const app = createControlPlaneApp();
 
-    const denied = await app.request("/organizations/org_demo/runtime-registration-tokens", {
+    const denied = await app.request(`/organizations/${TEST_ORG_ID}/runtime-registration-tokens`, {
       method: "POST",
       headers: {
         "content-type": "application/json"
@@ -61,7 +104,7 @@ describe("control-plane app", () => {
 
     expect(denied.status).toBe(403);
 
-    const granted = await app.request("/organizations/org_demo/runtime-registration-tokens", {
+    const granted = await app.request(`/organizations/${TEST_ORG_ID}/runtime-registration-tokens`, {
       method: "POST",
       headers: {
         "content-type": "application/json"
@@ -88,7 +131,7 @@ describe("control-plane app", () => {
   test("registers a runtime daemon and accepts heartbeat updates", async () => {
     const app = createControlPlaneApp();
 
-    const tokenResponse = await app.request("/organizations/org_demo/runtime-registration-tokens", {
+    const tokenResponse = await app.request(`/organizations/${TEST_ORG_ID}/runtime-registration-tokens`, {
       method: "POST",
       headers: {
         "content-type": "application/json"
@@ -148,6 +191,72 @@ describe("control-plane app", () => {
     expect(heartbeatPayload.runtime.status).toBe("online");
   });
 
+  test("marks expired runtimes offline on read paths", async () => {
+    const app = createControlPlaneApp();
+
+    const tokenResponse = await app.request(`/organizations/${TEST_ORG_ID}/runtime-registration-tokens`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        actorId: "usr_admin",
+        actorRole: "admin"
+      })
+    });
+    const tokenPayload = (await tokenResponse.json()) as { token: string };
+
+    const registerResponse = await app.request("/runtime/register", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        registrationToken: tokenPayload.token,
+        runtimeName: "ops-runtime",
+        runtimeKey: "runtime_001"
+      })
+    });
+    const registered = (await registerResponse.json()) as {
+      runtime: {
+        id: string;
+      };
+    };
+
+    const heartbeatResponse = await app.request("/runtime/heartbeat", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        runtimeId: registered.runtime.id,
+        occurredAt: "2025-01-01T00:00:00.000Z"
+      })
+    });
+
+    expect(heartbeatResponse.status).toBe(200);
+
+    const runtimesResponse = await app.request(`/organizations/${TEST_ORG_ID}/runtimes`);
+    const runtimesPayload = (await runtimesResponse.json()) as {
+      runtimes: Array<{
+        id: string;
+        status: string;
+      }>;
+    };
+
+    expect(runtimesPayload.runtimes.find((runtime) => runtime.id === registered.runtime.id)?.status).toBe("offline");
+
+    const bootstrapResponse = await app.request(`/bootstrap/workspace?organizationId=${encodeURIComponent(TEST_ORG_ID)}`);
+    const bootstrapPayload = (await bootstrapResponse.json()) as {
+      runtimes: Array<{
+        id: string;
+        status: string;
+      }>;
+    };
+
+    expect(bootstrapPayload.runtimes.find((runtime) => runtime.id === registered.runtime.id)?.status).toBe("offline");
+  });
+
   test("persists agent activity events in workspace bootstrap", async () => {
     const app = createControlPlaneApp();
 
@@ -167,7 +276,7 @@ describe("control-plane app", () => {
 
     expect(activityResponse.status).toBe(200);
 
-    const bootstrapResponse = await app.request("/bootstrap/workspace");
+    const bootstrapResponse = await app.request(`/bootstrap/workspace?organizationId=${encodeURIComponent(TEST_ORG_ID)}`);
     const bootstrapPayload = (await bootstrapResponse.json()) as {
       agentActivities?: Array<{
         agentId: string;
@@ -190,7 +299,7 @@ describe("control-plane app", () => {
   test("allows the same runtime key to reuse a registration token across restarts", async () => {
     const app = createControlPlaneApp();
 
-    const tokenResponse = await app.request("/organizations/org_demo/runtime-registration-tokens", {
+    const tokenResponse = await app.request(`/organizations/${TEST_ORG_ID}/runtime-registration-tokens`, {
       method: "POST",
       headers: {
         "content-type": "application/json"
@@ -238,7 +347,7 @@ describe("control-plane app", () => {
   test("rejects reusing a registration token for a different runtime key", async () => {
     const app = createControlPlaneApp();
 
-    const tokenResponse = await app.request("/organizations/org_demo/runtime-registration-tokens", {
+    const tokenResponse = await app.request(`/organizations/${TEST_ORG_ID}/runtime-registration-tokens`, {
       method: "POST",
       headers: {
         "content-type": "application/json"
@@ -283,7 +392,7 @@ describe("control-plane app", () => {
   test("creates multiple agents under a runtime daemon", async () => {
     const app = createControlPlaneApp();
 
-    const tokenResponse = await app.request("/organizations/org_demo/runtime-registration-tokens", {
+    const tokenResponse = await app.request(`/organizations/${TEST_ORG_ID}/runtime-registration-tokens`, {
       method: "POST",
       headers: {
         "content-type": "application/json"
@@ -343,7 +452,7 @@ describe("control-plane app", () => {
     expect(firstAgentResponse.status).toBe(201);
     expect(secondAgentResponse.status).toBe(201);
 
-    const bootstrapResponse = await app.request("/bootstrap/workspace");
+    const bootstrapResponse = await app.request(`/bootstrap/workspace?organizationId=${encodeURIComponent(TEST_ORG_ID)}`);
     const bootstrapPayload = (await bootstrapResponse.json()) as {
       runtimes: Array<{ id: string }>;
       agents: Array<{
@@ -370,26 +479,42 @@ describe("control-plane app", () => {
     expect(bootstrapPayload.agents.find((agent) => agent.name === "Incident Commander")?.channelId.startsWith("dir_")).toBe(true);
   });
 
-  test("creates a channel through the control-plane and allows posting messages to it", async () => {
+  test("creates a channel with description and members through the control-plane and allows posting messages to it", async () => {
     const app = createControlPlaneApp();
 
-    const createChannelResponse = await app.request("/organizations/org_demo/channels", {
+    const createChannelResponse = await app.request(`/organizations/${TEST_ORG_ID}/channels`, {
       method: "POST",
       headers: {
         "content-type": "application/json"
       },
       body: JSON.stringify({
-        name: "incidents"
+        name: "incidents",
+        description: "Cross-functional incident coordination",
+        members: [
+          { participantId: "usr_member", participantType: "user" },
+          { participantId: "agt_seed", participantType: "agent" }
+        ],
+        actorId: "usr_admin"
       })
     });
 
     expect(createChannelResponse.status).toBe(201);
 
     const createChannelPayload = (await createChannelResponse.json()) as {
-      channel: { id: string; name: string };
+      channel: { id: string; name: string; description?: string | null };
     };
 
     expect(createChannelPayload.channel.name).toBe("incidents");
+    expect(createChannelPayload.channel.description).toBe("Cross-functional incident coordination");
+
+    const bootstrapResponse = await app.request(`/bootstrap/workspace?organizationId=${encodeURIComponent(TEST_ORG_ID)}`);
+    const bootstrapPayload = (await bootstrapResponse.json()) as {
+      channels: Array<{ id: string; description?: string | null }>;
+    };
+
+    expect(bootstrapPayload.channels.find((channel) => channel.id === createChannelPayload.channel.id)?.description).toBe(
+      "Cross-functional incident coordination"
+    );
 
     const messageResponse = await app.request(`/channels/${createChannelPayload.channel.id}/messages`, {
       method: "POST",
@@ -404,6 +529,39 @@ describe("control-plane app", () => {
     });
 
     expect(messageResponse.status).toBe(201);
+  });
+
+  test("returns channel participants and updates channel metadata through the control-plane", async () => {
+    const app = createControlPlaneApp();
+
+    const participantsResponse = await app.request("/channels/chn_general/participants");
+    expect(participantsResponse.status).toBe(200);
+
+    const participantsPayload = (await participantsResponse.json()) as {
+      participants: Array<{ participantId: string; participantType: "user" | "agent"; displayName: string }>;
+    };
+
+    expect(participantsPayload.participants.some((participant) => participant.participantId === "usr_admin")).toBe(true);
+
+    const updateResponse = await app.request("/channels/chn_general", {
+      method: "PATCH",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        name: "all",
+        description: "General channel for the whole workspace"
+      })
+    });
+
+    expect(updateResponse.status).toBe(200);
+
+    const updatePayload = (await updateResponse.json()) as {
+      channel: { id: string; description?: string | null };
+    };
+
+    expect(updatePayload.channel.id).toBe("chn_general");
+    expect(updatePayload.channel.description).toBe("General channel for the whole workspace");
   });
 
   test("loads channel messages incrementally from a timestamp cursor", async () => {
@@ -445,6 +603,73 @@ describe("control-plane app", () => {
     expect(payload.messages.map((message) => message.content)).not.toContain("Earlier note");
   });
 
+  test("pulls group channel messages that explicitly mention an agent participant", async () => {
+    const app = createControlPlaneApp();
+
+    const channelResponse = await app.request(`/organizations/${TEST_ORG_ID}/channels`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        name: "dev",
+        actorId: "usr_admin",
+        members: [{ participantId: "agt_seed", participantType: "agent" }]
+      })
+    });
+    const channelPayload = (await channelResponse.json()) as { channel: { id: string } };
+
+    const messageResponse = await app.request(`/channels/${channelPayload.channel.id}/messages`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        content: "@Ops Bot can you answer this?",
+        senderId: "usr_admin",
+        senderType: "user"
+      })
+    });
+    const messagePayload = (await messageResponse.json()) as { message: { id: string } };
+
+    const pullResponse = await app.request("/runtime/messages/pull", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        runtimeId: "rtm_seed",
+        limit: 10
+      })
+    });
+    const pullPayload = (await pullResponse.json()) as {
+      claims: Array<{ agent: { id: string }; sourceMessage: { id: string; channelId: string } }>;
+    };
+
+    expect(pullPayload.claims).toHaveLength(1);
+    expect(pullPayload.claims[0]?.agent.id).toBe("agt_seed");
+    expect(pullPayload.claims[0]?.sourceMessage.id).toBe(messagePayload.message.id);
+    expect(pullPayload.claims[0]?.sourceMessage.channelId).toBe(channelPayload.channel.id);
+
+    const respondResponse = await app.request("/agent/message-events", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        agentId: "agt_seed",
+        sourceMessageId: messagePayload.message.id,
+        content: "I can help with that."
+      })
+    });
+    const respondPayload = (await respondResponse.json()) as {
+      message: { content: string; channelId: string };
+    };
+
+    expect(respondPayload.message.channelId).toBe(channelPayload.channel.id);
+    expect(respondPayload.message.content.startsWith("@admin ")).toBe(true);
+  });
+
   test("includes direct-thread agent activity alongside channel messages", async () => {
     const app = createControlPlaneApp();
 
@@ -477,7 +702,7 @@ describe("control-plane app", () => {
   test("soft deletes a runtime and hides its agents from workspace bootstrap", async () => {
     const app = createControlPlaneApp();
 
-    const tokenResponse = await app.request("/organizations/org_demo/runtime-registration-tokens", {
+    const tokenResponse = await app.request(`/organizations/${TEST_ORG_ID}/runtime-registration-tokens`, {
       method: "POST",
       headers: {
         "content-type": "application/json"
@@ -536,7 +761,7 @@ describe("control-plane app", () => {
 
     expect(deleteResponse.status).toBe(202);
 
-    const bootstrapResponse = await app.request("/bootstrap/workspace");
+    const bootstrapResponse = await app.request(`/bootstrap/workspace?organizationId=${encodeURIComponent(TEST_ORG_ID)}`);
     const bootstrapPayload = (await bootstrapResponse.json()) as {
       runtimes: Array<{ id: string }>;
       agents: Array<{ id: string; runtimeId: string }>;
@@ -626,7 +851,7 @@ describe("control-plane app", () => {
   test("controls an agent and exposes pending control actions to the runtime", async () => {
     const app = createControlPlaneApp();
 
-    const tokenResponse = await app.request("/organizations/org_demo/runtime-registration-tokens", {
+    const tokenResponse = await app.request(`/organizations/${TEST_ORG_ID}/runtime-registration-tokens`, {
       method: "POST",
       headers: {
         "content-type": "application/json"
@@ -722,7 +947,7 @@ describe("control-plane app", () => {
 
     expect(ackResponse.status).toBe(200);
 
-    const bootstrapResponse = await app.request("/bootstrap/workspace");
+    const bootstrapResponse = await app.request(`/bootstrap/workspace?organizationId=${encodeURIComponent(TEST_ORG_ID)}`);
     const bootstrapPayload = (await bootstrapResponse.json()) as {
       agents: Array<{ id: string; status: string }>;
     };
@@ -933,6 +1158,73 @@ describe("control-plane app", () => {
     expect(eventPayload.message.content).toContain("Rollback is safe");
   });
 
+  test("keeps hidden issue discussion channels out of visible channel lists and direct threads", async () => {
+    const app = createControlPlaneApp();
+
+    const issueResponse = await app.request("/messages/msg_seed/issues", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        actorId: "usr_admin",
+        assigneeId: "agt_seed",
+        title: "Investigate deploy regression"
+      })
+    });
+
+    expect(issueResponse.status).toBe(201);
+    const issuePayload = (await issueResponse.json()) as {
+      issue: { id: string; discussionChannelId: string };
+    };
+
+    const eventResponse = await app.request("/agent/issue-events", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        agentId: "agt_seed",
+        issueId: issuePayload.issue.id,
+        status: "in_review",
+        message: "@usr_admin Fixed and ready for review."
+      })
+    });
+
+    expect(eventResponse.status).toBe(200);
+
+    const channelsResponse = await app.request(`/organizations/${TEST_ORG_ID}/channels`);
+    const channelsPayload = (await channelsResponse.json()) as {
+      channels: Array<{ id: string; name: string }>;
+    };
+    expect(channelsPayload.channels.some((channel) => channel.id === issuePayload.issue.discussionChannelId)).toBe(false);
+    expect(channelsPayload.channels.some((channel) => channel.name.startsWith("issue-"))).toBe(false);
+
+    const bootstrapResponse = await app.request(`/bootstrap/workspace?organizationId=${encodeURIComponent(TEST_ORG_ID)}`);
+    const bootstrapPayload = (await bootstrapResponse.json()) as {
+      channels: Array<{ id: string }>;
+      messages: Array<{ channelId: string; content: string }>;
+    };
+    expect(bootstrapPayload.channels.some((channel) => channel.id === issuePayload.issue.discussionChannelId)).toBe(false);
+    expect(
+      bootstrapPayload.messages.some(
+        (message) =>
+          message.channelId === issuePayload.issue.discussionChannelId &&
+          message.content.includes("ready for review")
+      )
+    ).toBe(true);
+
+    const directMessagesResponse = await app.request("/channels/dir_admin_ops/messages");
+    const directMessagesPayload = (await directMessagesResponse.json()) as {
+      messages: Array<{ channelId: string; content: string }>;
+    };
+    expect(
+      directMessagesPayload.messages.some(
+        (message) => message.channelId === "dir_admin_ops" && message.content.includes("ready for review")
+      )
+    ).toBe(false);
+  });
+
   test("claims direct-thread user messages and records agent replies", async () => {
     const app = createControlPlaneApp();
 
@@ -1019,6 +1311,112 @@ describe("control-plane app", () => {
     expect(respondPayload.message.senderType).toBe("agent");
     expect(respondPayload.message.channelId).toBe(directChannelPayload.channel.id);
     expect(respondPayload.message.content).toContain("timed out");
+  });
+
+  test("records agent run logs and exposes them in bootstrap and channel polling", async () => {
+    const app = createControlPlaneApp({
+      controlPlaneUrl: "http://control-plane.local"
+    });
+
+    const runLogResponse = await app.request("/agent/run-logs", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        agentId: "agt_seed",
+        runtimeId: "rtm_seed",
+        channelId: "dir_admin_ops",
+        sessionId: "ses_debug",
+        kind: "direct_message",
+        prompt: "What broke in the deploy?",
+        response: "The health-check timed out.",
+        occurredAt: "2025-04-04T08:40:00.000Z"
+      })
+    });
+
+    expect(runLogResponse.status).toBe(201);
+
+    const bootstrapResponse = await app.request(`/bootstrap/workspace?organizationId=${encodeURIComponent(TEST_ORG_ID)}`);
+    const bootstrapPayload = (await bootstrapResponse.json()) as {
+      agentRunLogs: Array<{ agentId: string; sessionId: string; prompt: string }>;
+    };
+
+    expect(bootstrapPayload.agentRunLogs).toContainEqual(
+      expect.objectContaining({
+        agentId: "agt_seed",
+        sessionId: "ses_debug",
+        prompt: "What broke in the deploy?"
+      })
+    );
+
+    const channelMessagesResponse = await app.request(`/channels/dir_admin_ops/messages?organizationId=${TEST_ORG_ID}`);
+    const channelMessagesPayload = (await channelMessagesResponse.json()) as {
+      agentRunLogs: Array<{ channelId: string | null; sessionId: string }>;
+    };
+
+    expect(channelMessagesPayload.agentRunLogs).toContainEqual(
+      expect.objectContaining({
+        channelId: "dir_admin_ops",
+        sessionId: "ses_debug"
+      })
+    );
+  });
+
+  test("stores synced agent workspace files and exposes tree plus content", async () => {
+    const app = createControlPlaneApp({
+      controlPlaneUrl: "http://control-plane.local"
+    });
+
+    const syncResponse = await app.request("/agent/workspace-files", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        agentId: "agt_seed",
+        files: [
+          {
+            path: "memory.md",
+            kind: "file",
+            size: 24,
+            updatedAt: "2026-04-06T00:00:00.000Z",
+            content: "# User Preferences\n\n-"
+          },
+          {
+            path: "sessions/channel:dir_admin_ops/summary.md",
+            kind: "file",
+            size: 32,
+            updatedAt: "2026-04-06T00:00:01.000Z",
+            content: "# Conversation Summary"
+          }
+        ]
+      })
+    });
+
+    expect(syncResponse.status).toBe(201);
+
+    const listResponse = await app.request("/agents/agt_seed/workspace-files");
+    const listPayload = (await listResponse.json()) as {
+      files: Array<{ path: string; size: number }>;
+    };
+
+    expect(listPayload.files).toContainEqual(
+      expect.objectContaining({
+        path: "memory.md",
+        size: 24
+      })
+    );
+
+    const contentResponse = await app.request(
+      "/agents/agt_seed/workspace-files/content?path=sessions%2Fchannel%3Adir_admin_ops%2Fsummary.md"
+    );
+    const contentPayload = (await contentResponse.json()) as {
+      file: { path: string; content: string };
+    };
+
+    expect(contentPayload.file.path).toBe("sessions/channel:dir_admin_ops/summary.md");
+    expect(contentPayload.file.content).toContain("Conversation Summary");
   });
 
   test("creates isolated direct channels per user for the same agent", async () => {

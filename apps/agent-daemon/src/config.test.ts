@@ -20,6 +20,8 @@ describe("daemon config", () => {
     );
 
     expect(config?.heartbeatIntervalMs).toBe(30_000);
+    expect(config?.messagePollIntervalMs).toBe(1_000);
+    expect(config?.agentKey).toBe("host_macbook-pro");
     expect(config?.statePath.endsWith("/.workpilot/agent-daemon/state.json")).toBe(true);
     expect(config?.workspaceRoot.endsWith("/.workpilot/agent-daemon/workspace")).toBe(true);
   });

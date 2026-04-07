@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import type { WorkspaceBootstrapPayload } from "@workpilot/shared";
+import { TEST_ORG_ID, type WorkspaceBootstrapPayload } from "@workpilot/shared";
 import { resolveConversationChannelId } from "./conversation-channel";
 
 const workspace: WorkspaceBootstrapPayload = {
-  organization: { id: "org_demo" },
+  organization: { id: TEST_ORG_ID },
   channels: [
     { id: "chn_general", type: "group", name: "all" },
     { id: "dir_admin_ops", type: "direct", name: "Ada x Ops" },
@@ -35,7 +35,9 @@ const workspace: WorkspaceBootstrapPayload = {
     }
   ],
   agentActivities: [],
+  agentRunLogs: [],
   messages: [],
+  issueActivities: [],
   issues: []
 };
 

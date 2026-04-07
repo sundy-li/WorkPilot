@@ -1,8 +1,13 @@
 import type {
   AgentActivityDTO,
   AgentControlRequest,
+  AgentRunLogDTO,
+  AgentWorkspaceFileContentDTO,
+  AgentWorkspaceFileSummaryDTO,
   AuthSession,
+  ChannelParticipantDTO,
   ChannelSummary,
+  IssueActivityDTO,
   IssueDTO,
   MessageDTO,
   RuntimeRegistrationCommand,
@@ -43,6 +48,18 @@ interface SendMessageInput {
 interface CreateChannelInput {
   organizationId: string;
   name: string;
+  description?: string;
+  actorId?: string;
+  members?: Array<{
+    participantId: string;
+    participantType: "user" | "agent";
+  }>;
+}
+
+interface UpdateChannelInput {
+  channelId: string;
+  name: string;
+  description?: string;
 }
 
 interface CreateIssueFromMessageInput {
@@ -81,6 +98,7 @@ interface CreateIssueInput {
 
 interface UpdateIssueInput {
   issueId: string;
+  actorId: string;
   status?: IssueDTO["status"];
   assigneeId?: string | null;
   title?: string;
@@ -88,6 +106,18 @@ interface UpdateIssueInput {
   priority?: "low" | "medium" | "high";
   dueDate?: string | null;
   project?: string | null;
+}
+
+interface DeleteIssueInput {
+  issueId: string;
+  actorId: string;
+}
+
+interface CreateIssueCommentInput {
+  issueId: string;
+  actorId: string;
+  actorType?: "user" | "agent" | "system";
+  message: string;
 }
 
 interface CreateAgentInput {
@@ -130,6 +160,18 @@ export function createWorkPilotApiClient(options: CreateWorkPilotApiClientOption
     async getMe() {
       return requestJson<{ session: AuthSession }>(options, "/me");
     },
+    async getWorkspaces(userId: string) {
+      return requestJson<{ workspaces: Array<{ id: string; name: string; slug: string }> }>(
+        options,
+        `/workspaces?userId=${encodeURIComponent(userId)}`
+      );
+    },
+    async createWorkspace(input: { userId: string; name: string; description?: string }) {
+      return requestJson<{ workspace: { id: string; name: string; slug: string } }>(options, "/workspaces", {
+        method: "POST",
+        body: JSON.stringify(input)
+      });
+    },
     async getWorkspaceBootstrap(organizationId: string) {
       return requestJson<WorkspaceBootstrapPayload>(options, `/bootstrap/workspace?organizationId=${encodeURIComponent(organizationId)}`);
     },
@@ -142,7 +184,7 @@ export function createWorkPilotApiClient(options: CreateWorkPilotApiClientOption
         params.set("organizationId", input.organizationId);
       }
       const search = params.toString() ? `?${params.toString()}` : "";
-      return requestJson<{ messages: MessageDTO[]; agentActivities: AgentActivityDTO[] }>(
+      return requestJson<{ messages: MessageDTO[]; agentActivities: AgentActivityDTO[]; agentRunLogs: AgentRunLogDTO[] }>(
         options,
         `/channels/${channelId}/messages${search}`
       );
@@ -154,7 +196,22 @@ export function createWorkPilotApiClient(options: CreateWorkPilotApiClientOption
       return requestJson<{ channel: ChannelSummary }>(options, `/organizations/${input.organizationId}/channels`, {
         method: "POST",
         body: JSON.stringify({
-          name: input.name
+          name: input.name,
+          description: input.description,
+          actorId: input.actorId,
+          members: input.members ?? []
+        })
+      });
+    },
+    async getChannelParticipants(channelId: string) {
+      return requestJson<{ participants: ChannelParticipantDTO[] }>(options, `/channels/${channelId}/participants`);
+    },
+    async updateChannel(input: UpdateChannelInput) {
+      return requestJson<{ channel: ChannelSummary }>(options, `/channels/${input.channelId}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          name: input.name,
+          description: input.description
         })
       });
     },
@@ -181,6 +238,7 @@ export function createWorkPilotApiClient(options: CreateWorkPilotApiClientOption
       return requestJson<{ issue: IssueDTO }>(options, `/issues/${input.issueId}`, {
         method: "PATCH",
         body: JSON.stringify({
+          actorId: input.actorId,
           status: input.status,
           assigneeId: input.assigneeId,
           title: input.title,
@@ -188,6 +246,27 @@ export function createWorkPilotApiClient(options: CreateWorkPilotApiClientOption
           priority: input.priority,
           dueDate: input.dueDate,
           project: input.project
+        })
+      });
+    },
+    async getIssueActivities(issueId: string) {
+      return requestJson<{ activities: IssueActivityDTO[] }>(options, `/issues/${issueId}/activities`);
+    },
+    async deleteIssue(input: DeleteIssueInput) {
+      return requestJson<{ issueId: string }>(options, `/issues/${input.issueId}`, {
+        method: "DELETE",
+        body: JSON.stringify({
+          actorId: input.actorId
+        })
+      });
+    },
+    async createIssueComment(input: CreateIssueCommentInput) {
+      return requestJson<{ activity: IssueActivityDTO }>(options, `/issues/${input.issueId}/comments`, {
+        method: "POST",
+        body: JSON.stringify({
+          actorId: input.actorId,
+          actorType: input.actorType ?? "user",
+          message: input.message
         })
       });
     },
@@ -283,6 +362,104 @@ export function createWorkPilotApiClient(options: CreateWorkPilotApiClientOption
           occurredAt: input.occurredAt
         })
       });
+    },
+    async getWorkspacePermissions(orgId: string, userId?: string) {
+      const search = new URLSearchParams();
+      if (userId) search.set("userId", userId);
+      const query = search.toString() ? `?${search.toString()}` : "";
+      return requestJson<{ permissions: Array<{
+        id: string;
+        organizationId: string;
+        userId: string;
+        resourceType: "runtime" | "agent" | "channel";
+        resourceId: string;
+        permission: "read" | "write" | "admin";
+        createdAt: string;
+        createdBy: string;
+      }> }>(options, `/organizations/${orgId}/permissions${query}`);
+    },
+    async grantPermission(input: {
+      organizationId: string;
+      userId: string;
+      resourceType: "runtime" | "agent" | "channel";
+      resourceId: string;
+      permission: "read" | "write" | "admin";
+      grantedBy: string;
+    }) {
+      return requestJson<{ permission: {
+        id: string;
+        organizationId: string;
+        userId: string;
+        resourceType: "runtime" | "agent" | "channel";
+        resourceId: string;
+        permission: "read" | "write" | "admin";
+        createdAt: string;
+        createdBy: string;
+      } }>(options, `/organizations/${input.organizationId}/permissions`, {
+        method: "POST",
+        body: JSON.stringify(input)
+      });
+    },
+    async revokePermission(permissionId: string) {
+      return requestJson<{ ok: boolean }>(options, `/permissions/${permissionId}`, {
+        method: "DELETE"
+      });
+    },
+    async getWorkspaceInvitations(orgId: string) {
+      return requestJson<{ invitations: Array<{
+        id: string;
+        organizationId: string;
+        email: string;
+        role: "owner" | "admin" | "member";
+        invitedBy: string;
+        token: string;
+        expiresAt: string;
+        acceptedAt: string | null;
+        createdAt: string;
+      }> }>(options, `/organizations/${orgId}/invitations`);
+    },
+    async createWorkspaceInvitation(input: {
+      organizationId: string;
+      email: string;
+      role: "owner" | "admin" | "member";
+      invitedBy: string;
+    }) {
+      return requestJson<{ invitation: {
+        id: string;
+        organizationId: string;
+        email: string;
+        role: "owner" | "admin" | "member";
+        invitedBy: string;
+        token: string;
+        expiresAt: string;
+        acceptedAt: string | null;
+        createdAt: string;
+      } }>(options, `/organizations/${input.organizationId}/invitations`, {
+        method: "POST",
+        body: JSON.stringify(input)
+      });
+    },
+    async acceptWorkspaceInvitation(token: string, userId: string) {
+      return requestJson<{ ok: boolean }>(options, `/invitations/${token}/accept`, {
+        method: "POST",
+        body: JSON.stringify({ userId })
+      });
+    },
+    async getOrganizationMembers(orgId: string) {
+      return requestJson<{ members: Array<{
+        userId: string;
+        email: string;
+        role: "owner" | "admin" | "member";
+      }> }>(options, `/organizations/${orgId}/members`);
+    },
+    async listAgentWorkspaceFiles(agentId: string) {
+      return requestJson<{ files: AgentWorkspaceFileSummaryDTO[] }>(options, `/agents/${agentId}/workspace-files`);
+    },
+    async getAgentWorkspaceFileContent(agentId: string, path: string) {
+      return requestJson<{ file: AgentWorkspaceFileContentDTO }>(
+        options,
+        `/agents/${agentId}/workspace-files/content?path=${encodeURIComponent(path)}`
+      );
     }
   };
 }

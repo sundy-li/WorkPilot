@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { TEST_ORG_ID } from "@workpilot/shared";
 import { createControlPlaneApp } from "../../control-plane/src/app";
 import {
   acknowledgeAgentControlAction,
@@ -6,6 +7,7 @@ import {
   pullRuntimeAgentMessages,
   pullRuntimeIssues,
   recordAgentMessageResponse,
+  recordAgentRunLog,
   recordAgentIssueEvent,
   registerRuntimeDaemon,
   sendRuntimeHeartbeat
@@ -17,7 +19,7 @@ describe("agent daemon client", () => {
       controlPlaneUrl: "http://control-plane.local"
     });
 
-    const tokenResponse = await app.request("/organizations/org_demo/runtime-registration-tokens", {
+    const tokenResponse = await app.request(`/organizations/${TEST_ORG_ID}/runtime-registration-tokens`, {
       method: "POST",
       headers: {
         "content-type": "application/json"
@@ -50,7 +52,7 @@ describe("agent daemon client", () => {
       controlPlaneUrl: "http://control-plane.local"
     });
 
-    const tokenResponse = await app.request("/organizations/org_demo/runtime-registration-tokens", {
+    const tokenResponse = await app.request(`/organizations/${TEST_ORG_ID}/runtime-registration-tokens`, {
       method: "POST",
       headers: {
         "content-type": "application/json"
@@ -88,7 +90,7 @@ describe("agent daemon client", () => {
       controlPlaneUrl: "http://control-plane.local"
     });
 
-    const tokenResponse = await app.request("/organizations/org_demo/runtime-registration-tokens", {
+    const tokenResponse = await app.request(`/organizations/${TEST_ORG_ID}/runtime-registration-tokens`, {
       method: "POST",
       headers: {
         "content-type": "application/json"
@@ -242,5 +244,28 @@ describe("agent daemon client", () => {
 
     expect(event.message.senderType).toBe("agent");
     expect(event.message.channelId).toBe("dir_admin_ops");
+  });
+
+  test("records agent run logs for later inspection", async () => {
+    const app = createControlPlaneApp({
+      controlPlaneUrl: "http://control-plane.local"
+    });
+
+    const result = await recordAgentRunLog({
+      controlPlaneUrl: "http://control-plane.local",
+      fetcher: app.fetch,
+      agentId: "agt_seed",
+      runtimeId: "rtm_seed",
+      channelId: "dir_admin_ops",
+      sessionId: "ses_debug",
+      kind: "direct_message",
+      prompt: "What broke in the deploy?",
+      response: "The health-check timed out."
+    });
+
+    expect(result.log.agentId).toBe("agt_seed");
+    expect(result.log.sessionId).toBe("ses_debug");
+    expect(result.log.prompt).toContain("deploy");
+    expect(result.log.response).toContain("timed out");
   });
 });

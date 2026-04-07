@@ -64,8 +64,11 @@ export const routes: RouteDefinition[] = [
   { pattern: "/workspace/:workspaceId/channel/:channelId", parse: (p) => matchPath(["workspace", ":workspaceId", "channel", ":channelId"], p) },
   { pattern: "/workspace/:workspaceId/agent/:agentId", parse: (p) => matchPath(["workspace", ":workspaceId", "agent", ":agentId"], p) },
   { pattern: "/workspace/:workspaceId/issues", parse: (p) => matchPath(["workspace", ":workspaceId", "issues"], p) },
+  { pattern: "/workspace/:workspaceId/issues/:issueId", parse: (p) => matchPath(["workspace", ":workspaceId", "issues", ":issueId"], p) },
   { pattern: "/workspace/:workspaceId/agents", parse: (p) => matchPath(["workspace", ":workspaceId", "agents"], p) },
   { pattern: "/workspace/:workspaceId/runtimes", parse: (p) => matchPath(["workspace", ":workspaceId", "runtimes"], p) },
+  { pattern: "/workspace/:workspaceId/users", parse: (p) => matchPath(["workspace", ":workspaceId", "users"], p) },
+  { pattern: "/workspace/:workspaceId/user/:userId", parse: (p) => matchPath(["workspace", ":workspaceId", "user", ":userId"], p) },
   { pattern: "/workspace/:workspaceId/settings", parse: (p) => matchPath(["workspace", ":workspaceId", "settings"], p) },
 ];
 
@@ -89,9 +92,11 @@ export function buildPath(template: string, params: Record<string, string>): str
 
 export interface RouterState {
   workspaceId: string;
-  primaryView: "chat" | "issues" | "agents" | "runtimes" | "settings";
+  primaryView: "chat" | "issues" | "agents" | "runtimes" | "users" | "settings";
   activeChannelId: string | null;
   activeAgentId: string | null;
+  activeIssueId: string | null;
+  activeUserId: string | null;
   isLoginPage: boolean;
   isRoot: boolean;
 }
@@ -101,17 +106,19 @@ export function parseRouterState(pathname: string): RouterState {
 
   if (!match || match.route.pattern === "/login") {
     return {
-      workspaceId: "org_demo",
+      workspaceId: "",
       primaryView: "chat",
       activeChannelId: null,
       activeAgentId: null,
+      activeIssueId: null,
+      activeUserId: null,
       isLoginPage: true,
       isRoot: false,
     };
   }
 
   const { params } = match;
-  const workspaceId = params.workspaceId || "org_demo";
+  const workspaceId = params.workspaceId || "";
 
   if (match.route.pattern === "/") {
     return {
@@ -119,6 +126,8 @@ export function parseRouterState(pathname: string): RouterState {
       primaryView: "chat",
       activeChannelId: null,
       activeAgentId: null,
+      activeIssueId: null,
+      activeUserId: null,
       isLoginPage: false,
       isRoot: true,
     };
@@ -130,6 +139,8 @@ export function parseRouterState(pathname: string): RouterState {
       primaryView: "chat",
       activeChannelId: null,
       activeAgentId: null,
+      activeIssueId: null,
+      activeUserId: null,
       isLoginPage: false,
       isRoot: false,
     };
@@ -141,6 +152,8 @@ export function parseRouterState(pathname: string): RouterState {
       primaryView: "chat",
       activeChannelId: null,
       activeAgentId: null,
+      activeIssueId: null,
+      activeUserId: null,
       isLoginPage: false,
       isRoot: false,
     };
@@ -152,6 +165,8 @@ export function parseRouterState(pathname: string): RouterState {
       primaryView: "chat",
       activeChannelId: params.channelId || null,
       activeAgentId: null,
+      activeIssueId: null,
+      activeUserId: null,
       isLoginPage: false,
       isRoot: false,
     };
@@ -163,6 +178,8 @@ export function parseRouterState(pathname: string): RouterState {
       primaryView: "chat",
       activeChannelId: null,
       activeAgentId: params.agentId || null,
+      activeIssueId: null,
+      activeUserId: null,
       isLoginPage: false,
       isRoot: false,
     };
@@ -174,6 +191,21 @@ export function parseRouterState(pathname: string): RouterState {
       primaryView: "issues",
       activeChannelId: null,
       activeAgentId: null,
+      activeIssueId: null,
+      activeUserId: null,
+      isLoginPage: false,
+      isRoot: false,
+    };
+  }
+
+  if (match.route.pattern === "/workspace/:workspaceId/issues/:issueId") {
+    return {
+      workspaceId,
+      primaryView: "issues",
+      activeChannelId: null,
+      activeAgentId: null,
+      activeIssueId: params.issueId || null,
+      activeUserId: null,
       isLoginPage: false,
       isRoot: false,
     };
@@ -185,6 +217,8 @@ export function parseRouterState(pathname: string): RouterState {
       primaryView: "agents",
       activeChannelId: null,
       activeAgentId: null,
+      activeIssueId: null,
+      activeUserId: null,
       isLoginPage: false,
       isRoot: false,
     };
@@ -196,6 +230,34 @@ export function parseRouterState(pathname: string): RouterState {
       primaryView: "runtimes",
       activeChannelId: null,
       activeAgentId: null,
+      activeIssueId: null,
+      activeUserId: null,
+      isLoginPage: false,
+      isRoot: false,
+    };
+  }
+
+  if (match.route.pattern === "/workspace/:workspaceId/users") {
+    return {
+      workspaceId,
+      primaryView: "users",
+      activeChannelId: null,
+      activeAgentId: null,
+      activeIssueId: null,
+      activeUserId: null,
+      isLoginPage: false,
+      isRoot: false,
+    };
+  }
+
+  if (match.route.pattern === "/workspace/:workspaceId/user/:userId") {
+    return {
+      workspaceId,
+      primaryView: "users",
+      activeChannelId: null,
+      activeAgentId: null,
+      activeIssueId: null,
+      activeUserId: params.userId || null,
       isLoginPage: false,
       isRoot: false,
     };
@@ -207,16 +269,20 @@ export function parseRouterState(pathname: string): RouterState {
       primaryView: "settings",
       activeChannelId: null,
       activeAgentId: null,
+      activeIssueId: null,
+      activeUserId: null,
       isLoginPage: false,
       isRoot: false,
     };
   }
 
   return {
-    workspaceId: "org_demo",
+    workspaceId: "",
     primaryView: "chat",
     activeChannelId: null,
     activeAgentId: null,
+    activeIssueId: null,
+    activeUserId: null,
     isLoginPage: false,
     isRoot: false,
   };

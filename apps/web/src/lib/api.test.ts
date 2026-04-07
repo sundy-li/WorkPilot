@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { TEST_ORG_ID } from "@workpilot/shared";
 import { createControlPlaneApp } from "../../../control-plane/src/app";
 import { createWorkPilotApiClient } from "./api";
 
@@ -18,7 +19,7 @@ describe("workpilot api client", () => {
     });
 
     expect(payload.user.email).toBe("new-user@workpilot.local");
-    expect(payload.user.organizationId).toBe("org_demo");
+    expect(payload.user.organizationId).toBe("");
   });
 
   test("loads the bootstrap workspace payload from the control-plane", async () => {
@@ -31,9 +32,9 @@ describe("workpilot api client", () => {
       fetcher: app.fetch
     });
 
-    const payload = await client.getWorkspaceBootstrap("org_demo");
+    const payload = await client.getWorkspaceBootstrap(TEST_ORG_ID);
 
-    expect(payload.organization?.id).toBe("org_demo");
+    expect(payload.organization?.id).toBe(TEST_ORG_ID);
     expect(payload.channels.length).toBeGreaterThan(0);
     expect(payload.runtimes.length).toBeGreaterThan(0);
     expect(payload.messages.length).toBeGreaterThan(0);
@@ -50,10 +51,34 @@ describe("workpilot api client", () => {
       fetcher: app.fetch
     });
 
-    const payload = await client.getRuntimes("org_demo");
+    const payload = await client.getRuntimes(TEST_ORG_ID);
 
     expect(payload.runtimes.length).toBeGreaterThan(0);
     expect(payload.runtimes[0]?.id).toBe("rtm_seed");
+  });
+
+  test("lists and creates workspaces through the control-plane", async () => {
+    const app = createControlPlaneApp({
+      controlPlaneUrl: "http://control-plane.local"
+    });
+
+    const client = createWorkPilotApiClient({
+      baseUrl: "http://control-plane.local",
+      fetcher: app.fetch
+    });
+
+    const before = await client.getWorkspaces("usr_fresh");
+    expect(before.workspaces).toEqual([]);
+
+    const created = await client.createWorkspace({
+      userId: "usr_fresh",
+      name: "Release"
+    });
+
+    expect(created.workspace.slug).toBe("release");
+
+    const after = await client.getWorkspaces("usr_fresh");
+    expect(after.workspaces).toContainEqual(created.workspace);
   });
 
   test("loads channel messages after a timestamp cursor", async () => {
@@ -86,7 +111,7 @@ describe("workpilot api client", () => {
     expect(payload.messages.some((message) => message.content === "Fresh update")).toBe(true);
   });
 
-  test("creates a channel through the control-plane", async () => {
+  test("creates a channel with description and members through the control-plane", async () => {
     const app = createControlPlaneApp({
       controlPlaneUrl: "http://control-plane.local"
     });
@@ -97,12 +122,42 @@ describe("workpilot api client", () => {
     });
 
     const payload = await client.createChannel({
-      organizationId: "org_demo",
-      name: "incidents"
+      organizationId: TEST_ORG_ID,
+      name: "incidents",
+      description: "Cross-functional incident coordination",
+      actorId: "usr_admin",
+      members: [
+        { participantId: "usr_member", participantType: "user" },
+        { participantId: "agt_seed", participantType: "agent" }
+      ]
     });
 
     expect(payload.channel.id.startsWith("chn_")).toBe(true);
     expect(payload.channel.name).toBe("incidents");
+    expect(payload.channel.description).toBe("Cross-functional incident coordination");
+  });
+
+  test("loads channel participants and updates channel metadata through the control-plane", async () => {
+    const app = createControlPlaneApp({
+      controlPlaneUrl: "http://control-plane.local"
+    });
+
+    const client = createWorkPilotApiClient({
+      baseUrl: "http://control-plane.local",
+      fetcher: app.fetch
+    });
+
+    const participants = await client.getChannelParticipants("chn_general");
+    expect(participants.participants.some((participant) => participant.participantId === "usr_admin")).toBe(true);
+
+    const updated = await client.updateChannel({
+      channelId: "chn_general",
+      name: "all",
+      description: "General channel for the whole workspace"
+    });
+
+    expect(updated.channel.id).toBe("chn_general");
+    expect(updated.channel.description).toBe("General channel for the whole workspace");
   });
 
   test("controls an agent through the control-plane", async () => {
@@ -123,7 +178,7 @@ describe("workpilot api client", () => {
     expect(result.agent?.id).toBe("agt_seed");
     expect(result.agent?.status).toBe("stopped");
 
-    const payload = await client.getWorkspaceBootstrap("org_demo");
+    const payload = await client.getWorkspaceBootstrap(TEST_ORG_ID);
 
     expect(payload.agents.find((agent) => agent.id === "agt_seed")?.status).toBe("stopped");
   });
@@ -207,6 +262,7 @@ describe("workpilot api client", () => {
 
     const result = await client.updateIssue({
       issueId: created.issue.id,
+      actorId: "usr_admin",
       status: "in_progress"
     });
 
@@ -223,7 +279,7 @@ describe("workpilot api client", () => {
       fetcher: app.fetch
     });
 
-    const command = await client.createRuntimeRegistrationCommand("org_demo", "usr_admin", "admin");
+    const command = await client.createRuntimeRegistrationCommand(TEST_ORG_ID, "usr_admin", "admin");
     const registration = await app.request("/runtime/register", {
       method: "POST",
       headers: {

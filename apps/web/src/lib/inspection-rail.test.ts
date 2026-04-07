@@ -41,6 +41,7 @@ const issue: IssueDTO = {
   dueDate: null,
   project: null,
   sourceChannelId: "chn_general",
+  discussionChannelId: "ich_demo",
   createdAt: "2025-01-10T10:02:00.000Z",
   updatedAt: "2025-01-10T10:02:00.000Z"
 };

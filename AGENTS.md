@@ -55,10 +55,14 @@ packages/
 
 **Features**:
 - Email/password login
+- Empty-workspace onboarding that requires creating a workspace before entering the main app
 - Channel rail (group + direct messages)
+- Channel header tools for editing channel metadata and browsing current members
 - Message stream with attachments
+- Composer `@mention` suggestions for channel agents and members
 - Agent rail showing registered agents
 - Issue/task board with Kanban
+- Dedicated issue workspace page with editable properties and activity timeline
 - Runtime daemon connection panel
 - Agent creation and lifecycle control
 - Theme switching (core, mint, amber, rose)
@@ -78,16 +82,17 @@ packages/
 | Category | Routes |
 |----------|--------|
 | Auth | `/auth/register`, `/auth/login`, `/auth/magic-link/*` |
-| Organizations | `GET /organizations/:orgId`, `GET /organizations/:orgId/channels` |
+| Workspaces | `GET /workspaces`, `POST /workspaces`, `GET /organizations/:orgId`, `GET /organizations/:orgId/channels` |
+| Channels | `POST /organizations/:orgId/channels`, `PATCH /channels/:channelId`, `GET /channels/:channelId/participants` |
 | Runtimes | `POST /runtime/register`, `POST /runtime/heartbeat`, `DELETE /runtimes/:runtimeId` |
 | Agents | `POST /runtimes/:runtimeId/agents`, `POST /agents/:agentId/control` |
 | Messages | `GET/POST /channels/:channelId/messages`, `POST /messages/:messageId/issues` |
-| Issues | `POST /issues`, `PATCH /issues/:issueId`, `POST /runtime/issues/pull` |
+| Issues | `POST /issues`, `PATCH /issues/:issueId`, `DELETE /issues/:issueId`, `GET /issues/:issueId/activities`, `POST /issues/:issueId/comments`, `POST /runtime/issues/pull` |
 | Events | `POST /agent/issue-events`, `POST /agent/message-events` |
 
 **Storage**:
-- PostgreSQL when `DATABASE_URL` is present
-- In-memory for tests and development fallback
+- PostgreSQL in the running control-plane
+- In-memory storage remains test-only
 
 ### Agent Daemon (`apps/agent-daemon`)
 
@@ -100,12 +105,16 @@ packages/
 4. Control action polling and local application
 5. Task/issue polling and execution
 6. Event writeback (issue status updates, agent messages)
+7. Issue activity persistence for create/edit/status/agent execution events
 
 **Agent Host** (`agent-host.ts`):
 - Installs `sandbox-agent` packages
 - Manages agent sessions
 - Enforces lifecycle (start/stop/restart/delete)
 - Executes prompts and captures responses
+- Persists per-agent local workspace files under `~/.workpilot/agents/<agentId>/`
+- Maintains `memory.md`, `worklog.md`, and per-conversation `sessions/<conversationKey>/transcript.ndjson` plus `summary.md`
+- Syncs read-only workspace file snapshots back to the control-plane for UI inspection
 
 ### Shared Package (`packages/shared`)
 
@@ -172,9 +181,12 @@ bun run --cwd apps/web build
 ### Task Execution
 1. User promotes message to issue
 2. Daemon polls assigned issues via `POST /runtime/issues/pull`
-3. Daemon executes via sandbox-agent
-4. Daemon writes status update via `POST /agent/issue-events`
-5. Optional: Daemon posts response to channel
+3. Claiming a `todo` issue automatically moves it to `in_progress` and records issue activity
+4. Daemon executes via sandbox-agent
+5. On success the agent moves the issue to `in_review`, not directly to `done`
+6. Human review comments are stored on the issue timeline; moving back to `todo` sends that feedback back in the next agent prompt
+7. Daemon writes status/comment updates via `POST /agent/issue-events`
+8. Optional: Daemon posts response to channel
 
 ## Working Conventions
 
@@ -213,6 +225,28 @@ Before submitting any changes:
 - **YAGNI** - don't implement features "for future use"
 - **Single responsibility** - each file/module has one clear purpose
 - **Explicit over implicit** - clear naming and documentation
+
+### 5. UI/UX Design Guidelines
+
+When the task involves designing app interfaces, interaction flows, prototypes, visual layouts, micro-interactions, or overall user experience, strictly follow these principles:
+
+- **Apply Polanyi’s Tacit Knowledge (Tacit Knowing)**: Simulate the intuitive, embodied, and often inarticulable knowledge of an experienced human designer. As Michael Polanyi stated, “we can know more than we can tell.” Prioritize the overall “feels right” sensation, natural flow, and living quality of the experience rather than relying solely on explicit rules or current design trends.
+
+- Focus on the **from-to structure** of tacit knowing: Use subsidiary awareness (subtle details, spatial relationships, rhythms, micro-animations, and haptic feedback) to support focal awareness (the user’s main goal and emotional experience).
+
+- Emphasize **user body memory and implicit expectations**: Interactions should feel instinctive — users should “just know” how to operate without thinking, like riding a bicycle. Avoid overly instructional or hand-holding experiences.
+
+- In color, typography, motion, whitespace, and hierarchy, pursue **emergent harmony and intuitive beauty** instead of mechanically applying Material Design, iOS HIG, or popular trends.
+
+- First evaluate the design from the perspective of “what a senior human designer would intuitively feel comfortable with,” then validate it against explicit usability principles (e.g., Nielsen’s heuristics).
+
+- When users provide reference screenshots or competing apps, internalize their tacit essence (tone, rhythm, emotional feel) rather than copying them pixel-for-pixel.
+
+#### Specific Design Preferences (Workspace Style)
+
+- Prefer a **single workspace surface** over stacking multiple bordered cards inside the same page.
+- Use **layout, spacing, dividers, and subtle background shifts** before adding more boards, shadows, or nested borders.
+- Important working areas should be **full-height**
 
 ## Current Gaps
 

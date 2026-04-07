@@ -1,5 +1,5 @@
 import type { AgentIdentity, RuntimeAgentMessageClaimDTO, RuntimeIssueClaimDTO } from "@workpilot/shared";
-import { createSandboxAgentHost, type DaemonAgentHost } from "./agent-host";
+import { createAgentOsHost, type DaemonAgentHost } from "./agent-host";
 import {
   acknowledgeAgentControlAction,
   getRuntimeControlActions,
@@ -8,11 +8,14 @@ import {
   pullRuntimeIssues,
   recordAgentActivity,
   recordAgentMessageResponse,
+  recordAgentRunLog,
+  syncAgentWorkspaceFiles,
   recordAgentIssueEvent,
   registerRuntimeDaemon,
   sendRuntimeHeartbeat,
   type DaemonFetcher,
   type AgentMessageEventResponse,
+  type AgentWorkspaceFilesSyncResponse,
   type AcknowledgeAgentControlActionInput,
   type GetWorkspaceBootstrapInput,
   type GetRuntimeControlActionsInput,
@@ -34,8 +37,10 @@ export interface DaemonRuntimeConfig {
   nodeName: string;
   agentKey: string;
   heartbeatIntervalMs: number;
+  messagePollIntervalMs: number;
   statePath: string;
   workspaceRoot: string;
+  agentWorkspaceRoot?: string;
 }
 
 export interface DaemonRuntimeScheduler {
@@ -74,20 +79,25 @@ interface DaemonRuntimeDependencies {
   recordAgentMessageResponse?: (
     input: DaemonFetchContextualAgentMessageInput
   ) => Promise<AgentMessageEventResponse>;
+  recordAgentRunLog?: (input: DaemonFetchContextualAgentRunLogInput) => Promise<Awaited<ReturnType<typeof recordAgentRunLog>>>;
+  syncAgentWorkspaceFiles?: (input: DaemonFetchContextualAgentWorkspaceFilesInput) => Promise<AgentWorkspaceFilesSyncResponse>;
 }
 
 type DaemonFetchContextualIssueEventInput = Parameters<typeof recordAgentIssueEvent>[0];
 type DaemonFetchContextualAgentActivityInput = Parameters<typeof recordAgentActivity>[0];
 type DaemonFetchContextualAgentMessageInput = Parameters<typeof recordAgentMessageResponse>[0];
+type DaemonFetchContextualAgentRunLogInput = Parameters<typeof recordAgentRunLog>[0];
+type DaemonFetchContextualAgentWorkspaceFilesInput = Parameters<typeof syncAgentWorkspaceFiles>[0];
 
 export interface DaemonRuntime {
   readonly client: {
     sendHeartbeat: typeof sendRuntimeHeartbeat;
     getWorkspaceBootstrap: typeof getWorkspaceBootstrap;
   };
+  getState(): DaemonState | null;
   start(): Promise<void>;
   refreshAgents(): Promise<AgentIdentity[]>;
-  runAgentPrompt(agentId: string, prompt: string): Promise<{
+  runAgentPrompt(agentId: string, prompt: string, options?: { conversationKey?: string }): Promise<{
     sessionId: string;
     implementationPackage: string;
     responseText: string;
@@ -111,25 +121,19 @@ export function createDaemonRuntime(
   const sendIssueEvent = dependencies.recordAgentIssueEvent ?? recordAgentIssueEvent;
   const sendActivityEvent = dependencies.recordAgentActivity ?? recordAgentActivity;
   const sendAgentMessageResponse = dependencies.recordAgentMessageResponse ?? recordAgentMessageResponse;
+  const sendAgentRunLog = dependencies.recordAgentRunLog ?? recordAgentRunLog;
+  const sendAgentWorkspaceFiles = dependencies.syncAgentWorkspaceFiles ?? syncAgentWorkspaceFiles;
   const providedAgentHost = dependencies.agentHost ?? null;
 
   let state: DaemonState | null = null;
   let agentHost = providedAgentHost;
   let heartbeatLoop: { stop(): void } | null = null;
+  let messagePollLoop: { stop(): void } | null = null;
   let syncedAgentSignature: string | null = null;
   let syncedAgents = new Map<string, AgentIdentity>();
+  let pollAgentMessagesInFlight = false;
 
-  async function resolveState(): Promise<DaemonState> {
-    const storedState = await stateStore.load();
-
-    if (
-      storedState &&
-      storedState.controlPlaneUrl === config.controlPlaneUrl &&
-      storedState.runtimeKey === config.agentKey
-    ) {
-      return storedState;
-    }
-
+  async function registerFreshState(): Promise<DaemonState> {
     const registration = await registerRuntime({
       controlPlaneUrl: config.controlPlaneUrl,
       fetcher: dependencies.fetcher,
@@ -152,14 +156,35 @@ export function createDaemonRuntime(
     return nextState;
   }
 
+  async function resolveState(): Promise<DaemonState> {
+    const storedState = await stateStore.load();
+
+    if (
+      storedState &&
+      storedState.controlPlaneUrl === config.controlPlaneUrl
+    ) {
+      if (storedState.runtimeKey !== config.agentKey) {
+        console.log("[daemon] reusing persisted runtime registration", {
+          runtimeId: storedState.runtimeId,
+          persistedRuntimeKey: storedState.runtimeKey,
+          requestedRuntimeKey: config.agentKey
+        });
+      }
+      return storedState;
+    }
+
+    return registerFreshState();
+  }
+
   async function getAgentHost(currentState: DaemonState): Promise<DaemonAgentHost> {
     if (!agentHost) {
       agentHost =
         (await dependencies.createAgentHost?.(currentState)) ??
-        createSandboxAgentHost({
+        createAgentOsHost({
           runtimeId: currentState.runtimeId,
           runtimeName: currentState.runtimeName,
-          workspaceRoot: config.workspaceRoot
+          workspaceRoot: config.workspaceRoot,
+          agentWorkspaceRoot: config.agentWorkspaceRoot
         });
     }
 
@@ -175,20 +200,67 @@ export function createDaemonRuntime(
       runtimeId: state.runtimeId,
       runtimeName: state.runtimeName
     });
-    await sendHeartbeat({
+    try {
+      await sendHeartbeat({
+        controlPlaneUrl: config.controlPlaneUrl,
+        fetcher: dependencies.fetcher,
+        runtimeId: state.runtimeId
+      });
+    } catch (error) {
+      if (!(error instanceof Error) || error.message !== "Runtime daemon was not found.") {
+        throw error;
+      }
+
+      console.warn("[daemon] persisted runtime registration no longer exists; registering again", {
+        runtimeId: state.runtimeId,
+        runtimeName: state.runtimeName
+      });
+
+      state = await registerFreshState();
+
+      console.log("[daemon] sending heartbeat", {
+        runtimeId: state.runtimeId,
+        runtimeName: state.runtimeName
+      });
+
+      await sendHeartbeat({
+        controlPlaneUrl: config.controlPlaneUrl,
+        fetcher: dependencies.fetcher,
+        runtimeId: state.runtimeId
+      });
+    }
+  }
+
+  async function syncAgentWorkspaceSnapshot(agentId: string) {
+    if (!state) {
+      return;
+    }
+
+    const host = await getAgentHost(state);
+    const files = await host.listWorkspaceFiles(agentId);
+    await sendAgentWorkspaceFiles({
       controlPlaneUrl: config.controlPlaneUrl,
       fetcher: dependencies.fetcher,
-      runtimeId: state.runtimeId
+      agentId,
+      files
     });
   }
 
   const runtime: DaemonRuntime = {
     client: {
       sendHeartbeat: sendRuntimeHeartbeat,
-      getWorkspaceBootstrap
+      getWorkspaceBootstrap(input) {
+        return getWorkspaceBootstrap({
+          ...input,
+          runtimeId: input.runtimeId ?? state?.runtimeId
+        });
+      }
+    },
+    getState() {
+      return state;
     },
     async start() {
-      if (heartbeatLoop) {
+      if (heartbeatLoop || messagePollLoop) {
         return;
       }
 
@@ -198,10 +270,11 @@ export function createDaemonRuntime(
         runtimeName: state.runtimeName,
         controlPlaneUrl: config.controlPlaneUrl
       });
+      console.log(`[daemon] runtime id ${state.runtimeId}`);
 
+      await sendHeartbeatNow();
       const host = await getAgentHost(state);
       await host.start();
-      await sendHeartbeatNow();
       await this.refreshAgents();
       await pollControlActions();
       await pollIssues();
@@ -212,8 +285,10 @@ export function createDaemonRuntime(
         await this.refreshAgents();
         await pollControlActions();
         await pollIssues();
-        await pollAgentMessages();
       }, config.heartbeatIntervalMs);
+      messagePollLoop = scheduler.scheduleEvery(async () => {
+        await pollAgentMessages();
+      }, config.messagePollIntervalMs);
     },
     async refreshAgents() {
       if (!state) {
@@ -222,7 +297,8 @@ export function createDaemonRuntime(
 
       const bootstrap = await loadWorkspaceBootstrap({
         controlPlaneUrl: config.controlPlaneUrl,
-        fetcher: dependencies.fetcher
+        fetcher: dependencies.fetcher,
+        runtimeId: state.runtimeId
       });
       const agents = bootstrap.agents
         .filter((agent) => agent.runtimeId === state?.runtimeId)
@@ -253,10 +329,13 @@ export function createDaemonRuntime(
       await host.syncAgents(agents);
       syncedAgentSignature = signature;
       syncedAgents = new Map(agents.map((agent) => [agent.id, agent]));
+      for (const agent of agents) {
+        await syncAgentWorkspaceSnapshot(agent.id);
+      }
 
       return agents;
     },
-    async runAgentPrompt(agentId, prompt) {
+    async runAgentPrompt(agentId, prompt, options) {
       if (!state) {
         state = await resolveState();
       }
@@ -278,13 +357,17 @@ export function createDaemonRuntime(
         runtimeId: state.runtimeId,
         agentId,
         agentName: agent.name,
+        conversationKey: options?.conversationKey ?? "default",
         promptLength: prompt.length
       });
-      return await host.run(agent, prompt);
+      return await host.run(agent, prompt, options);
     },
     async stop() {
       heartbeatLoop?.stop();
       heartbeatLoop = null;
+      messagePollLoop?.stop();
+      messagePollLoop = null;
+      pollAgentMessagesInFlight = false;
 
       if (!agentHost) {
         return;
@@ -363,19 +446,28 @@ export function createDaemonRuntime(
       return;
     }
 
-    const response = await loadRuntimeAgentMessages({
-      controlPlaneUrl: config.controlPlaneUrl,
-      fetcher: dependencies.fetcher,
-      runtimeId: state.runtimeId,
-      limit: 10
-    });
-    console.log("[daemon] polled agent messages", {
-      runtimeId: state.runtimeId,
-      count: response.claims.length
-    });
+    if (pollAgentMessagesInFlight) {
+      return;
+    }
 
-    for (const claim of response.claims) {
-      await runMessageClaim(claim);
+    pollAgentMessagesInFlight = true;
+    try {
+      const response = await loadRuntimeAgentMessages({
+        controlPlaneUrl: config.controlPlaneUrl,
+        fetcher: dependencies.fetcher,
+        runtimeId: state.runtimeId,
+        limit: 10
+      });
+      console.log("[daemon] polled agent messages", {
+        runtimeId: state.runtimeId,
+        count: response.claims.length
+      });
+
+      for (const claim of response.claims) {
+        await runMessageClaim(claim);
+      }
+    } finally {
+      pollAgentMessagesInFlight = false;
     }
   }
 
@@ -396,7 +488,9 @@ export function createDaemonRuntime(
         summary: `${claim.agent.implementation === "codex" ? "Codex CLI" : claim.agent.name} is working on "${claim.issue.title}".`,
         detail: "Executing delegated issue work."
       });
-      const result = await runtime.runAgentPrompt(claim.agent.id, buildIssuePrompt(claim));
+      const result = await runtime.runAgentPrompt(claim.agent.id, buildIssuePrompt(claim), {
+        conversationKey: getIssueConversationKey(claim)
+      });
 
       console.log("[daemon] issue claim completed", {
         runtimeId: state?.runtimeId ?? null,
@@ -405,15 +499,28 @@ export function createDaemonRuntime(
         sessionId: result.sessionId,
         responseLength: result.responseText.length
       });
+      await sendAgentRunLog({
+        controlPlaneUrl: config.controlPlaneUrl,
+        fetcher: dependencies.fetcher,
+        agentId: claim.agent.id,
+        runtimeId: claim.agent.runtimeId,
+        channelId: claim.issue.sourceChannelId,
+        issueId: claim.issue.id,
+        sessionId: result.sessionId,
+        kind: "issue",
+        prompt: buildIssuePrompt(claim),
+        response: result.responseText.trim() || `Issue run completed in session ${result.sessionId}.`
+      });
+      await syncAgentWorkspaceSnapshot(claim.agent.id);
       await sendIssueEvent({
         controlPlaneUrl: config.controlPlaneUrl,
         fetcher: dependencies.fetcher,
         agentId: claim.agent.id,
         issueId: claim.issue.id,
-        status: "done",
+        status: "in_review",
         message:
           result.responseText.trim() ||
-          `Issue "${claim.issue.title}" completed in session ${result.sessionId} via ${result.implementationPackage}.`
+          `Issue "${claim.issue.title}" is ready for review from session ${result.sessionId} via ${result.implementationPackage}.`
       });
       await sendActivityEvent({
         controlPlaneUrl: config.controlPlaneUrl,
@@ -468,7 +575,9 @@ export function createDaemonRuntime(
         summary: `${claim.agent.implementation === "codex" ? "Codex CLI" : claim.agent.name} is replying in chat.`,
         detail: `Working on message ${claim.sourceMessage.id}.`
       });
-      const result = await runtime.runAgentPrompt(claim.agent.id, buildDirectMessagePrompt(claim));
+      const result = await runtime.runAgentPrompt(claim.agent.id, buildDirectMessagePrompt(claim), {
+        conversationKey: getMessageConversationKey(claim)
+      });
 
       console.log("[daemon] direct message completed", {
         runtimeId: state?.runtimeId ?? null,
@@ -477,6 +586,18 @@ export function createDaemonRuntime(
         sessionId: result.sessionId,
         responseLength: result.responseText.length
       });
+      await sendAgentRunLog({
+        controlPlaneUrl: config.controlPlaneUrl,
+        fetcher: dependencies.fetcher,
+        agentId: claim.agent.id,
+        runtimeId: claim.agent.runtimeId,
+        channelId: claim.sourceMessage.channelId,
+        sessionId: result.sessionId,
+        kind: "direct_message",
+        prompt: buildDirectMessagePrompt(claim),
+        response: result.responseText.trim() || `Direct reply completed in session ${result.sessionId}.`
+      });
+      await syncAgentWorkspaceSnapshot(claim.agent.id);
       await sendAgentMessageResponse({
         controlPlaneUrl: config.controlPlaneUrl,
         fetcher: dependencies.fetcher,
@@ -533,11 +654,23 @@ export function createDaemonRuntime(
     const sourceMessages = claim.sourceMessages
       .map((message, index) => `${index + 1}. [${message.senderType}:${message.senderId}] ${message.content}`)
       .join("\n");
+    const issueHistory = claim.issueActivities
+      .map((activity, index) => {
+        const detail = activity.message
+          ? `message=${activity.message}`
+          : activity.field
+            ? `${activity.field}: ${activity.fromValue ?? "(empty)"} -> ${activity.toValue ?? "(empty)"}`
+            : null;
+        return `${index + 1}. [${activity.actorType}:${activity.actorId}] ${activity.kind}${detail ? ` | ${detail}` : ""}`;
+      })
+      .join("\n");
 
     return [
       `Issue: ${claim.issue.title}`,
       claim.issue.description ? `Description: ${claim.issue.description}` : null,
       `Assigned Agent: ${claim.agent.name}`,
+      "Issue Activity:",
+      issueHistory || "(none)",
       "Source Messages:",
       sourceMessages || "(none)"
     ]
@@ -566,6 +699,14 @@ export function createDaemonRuntime(
   }
 
   return runtime;
+}
+
+function getMessageConversationKey(claim: RuntimeAgentMessageClaimDTO) {
+  return `channel:${claim.sourceMessage.channelId}`;
+}
+
+function getIssueConversationKey(claim: RuntimeIssueClaimDTO) {
+  return `issue:${claim.issue.id}`;
 }
 
 function createIntervalScheduler(): DaemonRuntimeScheduler {

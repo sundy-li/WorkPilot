@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import type { WorkspaceBootstrapPayload } from "@workpilot/shared";
+import { TEST_ORG_ID, type WorkspaceBootstrapPayload } from "@workpilot/shared";
 import { createInitialShellState } from "./shell-state";
 import { openAgentCreationFromRuntimeMenu, openAgentCreationFromSidebar } from "./sidebar-actions";
 
 const workspace: WorkspaceBootstrapPayload = {
   organization: {
-    id: "org_demo"
+    id: TEST_ORG_ID
   },
   channels: [
     {
@@ -23,7 +23,9 @@ const workspace: WorkspaceBootstrapPayload = {
   ],
   agents: [],
   agentActivities: [],
+  agentRunLogs: [],
   messages: [],
+  issueActivities: [],
   issues: []
 };
 

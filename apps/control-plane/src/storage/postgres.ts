@@ -3,8 +3,12 @@ import type {
   AgentActivityDTO,
   AgentControlActionDTO,
   AgentIdentity,
+  IssueActivityDTO,
+  AgentRunLogDTO,
+  AgentWorkspaceFileContentDTO,
   RuntimeIssueClaimDTO,
   AuthSession,
+  ChannelParticipantDTO,
   ChannelSummary,
   IssueDTO,
   MessageDTO,
@@ -15,12 +19,17 @@ import { assertSafeIdentifier, readSchemaSql } from "./schema";
 import type {
   ControlPlaneStorage,
   CreateAgentInput,
+  CreateWorkspaceInput,
   CreateIssueFromMessagesInput,
   CreateIssueFromMessageInput,
   CreateMessageInput,
   CreateRuntimeRegistrationCommandInput,
+  CreateWorkspaceInvitationInput,
   RecordRuntimeHeartbeatInput,
-  RegisterRuntimeInput
+  RegisterRuntimeInput,
+  GrantPermissionInput,
+  UpdateIssueInput,
+  UpdateChannelInput
 } from "./types";
 
 interface CreatePostgresControlPlaneStorageOptions {
@@ -30,9 +39,253 @@ interface CreatePostgresControlPlaneStorageOptions {
 
 type SqlClient = InstanceType<typeof SQL> | Bun.ReservedSQL;
 
+function dedupeChannelParticipants(
+  participants: Array<{
+    participantId: string;
+    participantType: "user" | "agent";
+  }>
+) {
+  const seen = new Set<string>();
+  return participants.filter((participant) => {
+    const key = `${participant.participantType}:${participant.participantId}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
+function mapIssueActivityRow(row: {
+  id: string;
+  issueId: string;
+  actorId: string;
+  actorType: IssueActivityDTO["actorType"];
+  kind: IssueActivityDTO["kind"];
+  field: string | null;
+  fromValue: string | null;
+  toValue: string | null;
+  message: string | null;
+  createdAt: string;
+}): IssueActivityDTO {
+  return {
+    id: row.id,
+    issueId: row.issueId,
+    actorId: row.actorId,
+    actorType: row.actorType,
+    kind: row.kind,
+    field: row.field,
+    fromValue: row.fromValue,
+    toValue: row.toValue,
+    message: row.message,
+    createdAt: row.createdAt
+  };
+}
+
+async function insertIssueActivity(
+  sql: SqlClient,
+  input: Omit<IssueActivityDTO, "id"> & { id?: string; organizationId: string }
+) {
+  await sql`
+    insert into issue_activities (
+      id,
+      organization_id,
+      issue_id,
+      actor_id,
+      actor_type,
+      kind,
+      field,
+      from_value,
+      to_value,
+      message,
+      created_at
+    )
+    values (
+      ${input.id ?? createId("isa")},
+      ${input.organizationId},
+      ${input.issueId},
+      ${input.actorId},
+      ${input.actorType},
+      ${input.kind},
+      ${input.field},
+      ${input.fromValue},
+      ${input.toValue},
+      ${input.message},
+      ${input.createdAt}
+    )
+  `;
+}
+
+function describeIssueMutations(previous: IssueDTO, next: IssueDTO, actorId: string, createdAt: string): Array<Omit<IssueActivityDTO, "id"> & { organizationId?: string }> {
+  const activities: Array<Omit<IssueActivityDTO, "id"> & { organizationId?: string }> = [];
+
+  if (previous.status !== next.status) {
+    activities.push({
+      issueId: next.id,
+      actorId,
+      actorType: "user",
+      kind: "status_changed",
+      field: "status",
+      fromValue: previous.status,
+      toValue: next.status,
+      message: null,
+      createdAt
+    });
+  }
+
+  if (previous.assigneeId !== next.assigneeId) {
+    activities.push({
+      issueId: next.id,
+      actorId,
+      actorType: "user",
+      kind: "assignee_changed",
+      field: "assigneeId",
+      fromValue: previous.assigneeId,
+      toValue: next.assigneeId,
+      message: null,
+      createdAt
+    });
+  }
+
+  if (previous.priority !== next.priority) {
+    activities.push({
+      issueId: next.id,
+      actorId,
+      actorType: "user",
+      kind: "priority_changed",
+      field: "priority",
+      fromValue: previous.priority,
+      toValue: next.priority,
+      message: null,
+      createdAt
+    });
+  }
+
+  if ((previous.dueDate ?? null) !== (next.dueDate ?? null)) {
+    activities.push({
+      issueId: next.id,
+      actorId,
+      actorType: "user",
+      kind: "due_date_changed",
+      field: "dueDate",
+      fromValue: previous.dueDate,
+      toValue: next.dueDate,
+      message: null,
+      createdAt
+    });
+  }
+
+  if (previous.title !== next.title) {
+    activities.push({
+      issueId: next.id,
+      actorId,
+      actorType: "user",
+      kind: "title_changed",
+      field: "title",
+      fromValue: previous.title,
+      toValue: next.title,
+      message: null,
+      createdAt
+    });
+  }
+
+  if (previous.description !== next.description) {
+    activities.push({
+      issueId: next.id,
+      actorId,
+      actorType: "user",
+      kind: "description_changed",
+      field: "description",
+      fromValue: previous.description,
+      toValue: next.description,
+      message: null,
+      createdAt
+    });
+  }
+
+  return activities;
+}
+
+async function updateIssueWithActivities(sql: SqlClient, input: UpdateIssueInput): Promise<IssueDTO> {
+  const updatedAt = input.now ?? new Date().toISOString();
+
+  return await sql.begin(async (transaction) => {
+    const [previousIssue] = await transaction<(IssueDTO & { organizationId: string })[]>`
+      select
+        id,
+        organization_id as "organizationId",
+        title,
+        description,
+        status,
+        assignee_id as "assigneeId",
+        creator_id as "creatorId",
+        priority,
+        due_date as "dueDate",
+        project,
+        source_channel_id as "sourceChannelId",
+        created_at as "createdAt",
+        updated_at as "updatedAt"
+      from issues
+      where id = ${input.issueId}
+      limit 1
+    `;
+
+    if (!previousIssue) {
+      throw new Error("Issue was not found.");
+    }
+
+    const [issue] = await transaction<IssueDTO[]>`
+      update issues
+      set
+        status = coalesce(${input.status ?? null}, status),
+        assignee_id = case when ${input.assigneeId === undefined} then assignee_id else ${input.assigneeId ?? null} end,
+        title = coalesce(${input.title ?? null}, title),
+        description = coalesce(${input.description ?? null}, description),
+        priority = coalesce(${input.priority ?? null}, priority),
+        due_date = case when ${input.dueDate === undefined} then due_date else ${input.dueDate ?? null} end,
+        project = case when ${input.project === undefined} then project else ${input.project ?? null} end,
+        updated_at = ${updatedAt}
+      where id = ${input.issueId}
+      returning
+        id,
+        title,
+        description,
+        status,
+        assignee_id as "assigneeId",
+        creator_id as "creatorId",
+        priority,
+        due_date as "dueDate",
+        project,
+        source_channel_id as "sourceChannelId",
+        created_at as "createdAt",
+        updated_at as "updatedAt"
+    `;
+
+    for (const activity of describeIssueMutations(previousIssue, issue, input.actorId, updatedAt)) {
+      await insertIssueActivity(transaction, {
+        ...activity,
+        organizationId: previousIssue.organizationId
+      });
+    }
+
+    return issue;
+  });
+}
+
+function prefixMentionedReply(content: string, displayName: string) {
+  const normalized = content.trim();
+  if (!displayName.trim()) {
+    return normalized;
+  }
+
+  const mention = `@${displayName}`;
+  return normalized.startsWith(mention) ? normalized : `${mention} ${normalized}`.trim();
+}
+
 export async function createPostgresControlPlaneStorage(
   options: CreatePostgresControlPlaneStorageOptions
 ): Promise<ControlPlaneStorage & { initialize(): Promise<void>; seedDemoWorkspace(): Promise<void>; dispose(): Promise<void> }> {
+  const runtimeOfflineThresholdMs = 60_000;
   const schema = options.schema ?? "public";
   assertSafeIdentifier(schema);
 
@@ -48,7 +301,7 @@ export async function createPostgresControlPlaneStorage(
 
   const demoSession: AuthSession = {
     userId: "usr_admin",
-    organizationId: "org_demo",
+    organizationId: "",
     email: "admin@workpilot.local",
     role: "admin"
   };
@@ -60,8 +313,8 @@ export async function createPostgresControlPlaneStorage(
   };
 
   const getChannel = async (channelId: string) => {
-    const [channel] = await sql<Array<{ id: string; type: "group" | "direct"; name: string }>>`
-      select id, type, name
+    const [channel] = await sql<Array<{ id: string; type: "group" | "direct"; name: string; description: string | null }>>`
+      select id, type, name, description
       from channels
       where id = ${channelId}
       limit 1
@@ -71,11 +324,16 @@ export async function createPostgresControlPlaneStorage(
 
   const getChannels = async (orgId: string) => {
     const rows = await sql<
-      Array<{ id: string; type: "group" | "direct"; name: string }>
+      Array<{ id: string; type: "group" | "direct"; name: string; description: string | null }>
     >`
-      select c.id, c.type, c.name
+      select c.id, c.type, c.name, c.description
       from channels c
       where c.organization_id = ${orgId}
+        and not exists (
+          select 1
+          from issues i
+          where i.discussion_channel_id = c.id
+        )
         and (
           c.type <> 'direct'
           or exists (
@@ -103,8 +361,9 @@ export async function createPostgresControlPlaneStorage(
   };
 
   const getRuntimes = async (orgId: string) => {
+    await reconcileOfflineRuntimeStatuses(orgId);
     return sql<RuntimeIdentity[]>`
-      select id, name, status
+      select id, name, status, last_heartbeat_at as "lastHeartbeatAt"
       from runtime_daemons
       where organization_id = ${orgId}
         and status <> 'deleted'
@@ -132,10 +391,101 @@ export async function createPostgresControlPlaneStorage(
     `;
   };
 
+  const reconcileOfflineRuntimeStatuses = async (orgId: string) => {
+    const cutoff = new Date(Date.now() - runtimeOfflineThresholdMs).toISOString();
+    await sql`
+      update runtime_daemons
+      set status = 'offline'
+      where organization_id = ${orgId}
+        and status not in ('offline', 'revoked', 'deleted')
+        and last_heartbeat_at is not null
+        and last_heartbeat_at < ${cutoff}
+    `;
+  };
+
+  async function buildWorkspaceBootstrap(orgId: string): Promise<WorkspaceBootstrapPayload> {
+    const [organization, channels, runtimes, agents, issues, issueActivities, messages, agentRunLogs] = await Promise.all([
+      getOrganization(orgId),
+      getChannels(orgId),
+      getRuntimes(orgId),
+      getAgents(orgId),
+      sql<IssueDTO[]>`
+        select
+          id, title, description, status,
+          assignee_id as "assigneeId", creator_id as "creatorId", priority,
+          due_date as "dueDate", project, source_channel_id as "sourceChannelId",
+          discussion_channel_id as "discussionChannelId",
+          created_at as "createdAt", updated_at as "updatedAt"
+        from issues where organization_id = ${orgId} order by created_at asc
+      `,
+      sql<IssueActivityDTO[]>`
+        select
+          id, issue_id as "issueId", actor_id as "actorId", actor_type as "actorType",
+          kind, field, from_value as "fromValue", to_value as "toValue", message,
+          created_at as "createdAt"
+        from issue_activities where organization_id = ${orgId} order by created_at desc
+      `,
+      sql<MessageDTO[]>`
+        select id, channel_id as "channelId", content, attachments,
+          sender_id as "senderId", sender_type as "senderType", created_at as "createdAt"
+        from messages where organization_id = ${orgId} order by created_at asc
+      `,
+      sql<AgentRunLogDTO[]>`
+        select
+          id, agent_id as "agentId", runtime_id as "runtimeId",
+          channel_id as "channelId", issue_id as "issueId",
+          session_id as "sessionId", kind, prompt, response,
+          created_at as "createdAt"
+        from agent_run_logs where organization_id = ${orgId} order by created_at desc
+      `
+    ]);
+
+    const visibleChannelIds = new Set(channels.map((c) => c.id));
+    const visibleAgentIds = new Set(agents.map((a) => a.id));
+    const visibleIssueChannelIds = new Set(issues.map((i) => i.discussionChannelId));
+
+    return {
+      organization,
+      channels,
+      runtimes,
+      agents,
+      agentActivities: [...(agentActivitiesByOrganization.get(orgId)?.values() ?? [])]
+        .filter((activity) => visibleAgentIds.has(activity.agentId))
+        .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt)),
+      agentRunLogs: agentRunLogs.filter(
+        (log) => visibleAgentIds.has(log.agentId) && (!log.channelId || visibleChannelIds.has(log.channelId) || visibleIssueChannelIds.has(log.channelId))
+      ),
+      messages: messages.filter((message) => visibleChannelIds.has(message.channelId) || visibleIssueChannelIds.has(message.channelId)),
+      issues,
+      issueActivities
+    } satisfies WorkspaceBootstrapPayload;
+  }
+
   return {
     async initialize() {
       const schemaSql = await readSchemaSql();
       await sql.unsafe(schemaSql);
+
+      const issuesMissingDiscussionChannels = await sql<Array<{ id: string; organizationId: string; createdAt: string }>>`
+        select id, organization_id as "organizationId", created_at as "createdAt"
+        from issues
+        where discussion_channel_id is null
+      `;
+
+      for (const issue of issuesMissingDiscussionChannels) {
+        const discussionChannelId = createId("ich");
+        await sql.begin(async (transaction) => {
+          await transaction`
+            insert into channels (id, organization_id, type, name, description, created_at)
+            values (${discussionChannelId}, ${issue.organizationId}, 'group', ${`issue-${issue.id.slice(-6)}`}, ${'Hidden issue discussion'}, ${issue.createdAt})
+          `;
+          await transaction`
+            update issues
+            set discussion_channel_id = ${discussionChannelId}
+            where id = ${issue.id}
+          `;
+        });
+      }
     },
     async seedDemoWorkspace() {
       await sql.unsafe(
@@ -148,17 +498,107 @@ export async function createPostgresControlPlaneStorage(
         values ('usr_admin', 'admin@workpilot.local', 'demo-password')
         on conflict (id) do nothing;
 
+        insert into users (id, email, password_hash)
+        values ('usr_member', 'member@workpilot.local', 'demo-password')
+        on conflict (id) do nothing;
+
         insert into memberships (organization_id, user_id, role)
         values ('org_demo', 'usr_admin', 'admin')
+        on conflict (organization_id, user_id) do nothing;
+
+        insert into memberships (organization_id, user_id, role)
+        values ('org_demo', 'usr_member', 'member')
         on conflict (organization_id, user_id) do nothing;
 
         insert into channels (id, organization_id, type, name)
         values ('chn_general', 'org_demo', 'group', 'all')
         on conflict (id) do nothing;
 
+        insert into channels (id, organization_id, type, name)
+        values ('dir_admin_ops', 'org_demo', 'direct', 'Ada x Ops Bot')
+        on conflict (id) do nothing;
+
         insert into channel_participants (channel_id, participant_id, participant_type)
         values ('chn_general', 'usr_admin', 'user')
         on conflict (channel_id, participant_id, participant_type) do nothing;
+
+        insert into channel_participants (channel_id, participant_id, participant_type)
+        values
+          ('chn_general', 'usr_member', 'user'),
+          ('chn_general', 'agt_seed', 'agent'),
+          ('dir_admin_ops', 'usr_admin', 'user'),
+          ('dir_admin_ops', 'agt_seed', 'agent')
+        on conflict (channel_id, participant_id, participant_type) do nothing;
+
+        insert into runtime_daemons (
+          id,
+          organization_id,
+          name,
+          runtime_key,
+          status,
+          credential_id,
+          last_heartbeat_at,
+          created_at
+        )
+        values (
+          'rtm_seed',
+          'org_demo',
+          'Seed Runtime',
+          'runtime_seed',
+          'online',
+          'cred_seed',
+          '2025-01-01T00:00:00.000Z',
+          '2025-01-01T00:00:00.000Z'
+        )
+        on conflict (id) do nothing;
+
+        insert into agents (
+          id,
+          organization_id,
+          runtime_id,
+          channel_id,
+          name,
+          description,
+          implementation,
+          model,
+          reasoning_effort,
+          status
+        )
+        values (
+          'agt_seed',
+          'org_demo',
+          'rtm_seed',
+          'dir_admin_ops',
+          'Ops Bot',
+          'Monitor incidents, summarize impact, and propose next actions.',
+          'claude',
+          'default',
+          'medium',
+          'running'
+        )
+        on conflict (id) do nothing;
+
+        insert into messages (
+          id,
+          organization_id,
+          channel_id,
+          sender_id,
+          sender_type,
+          content,
+          attachments,
+          created_at
+        )
+        values (
+          'msg_seed',
+          'org_demo',
+          'chn_general',
+          'usr_admin',
+          'user',
+          'Deployment health-check failed on production cluster.',
+          '[]'::jsonb,
+          '2025-01-01T00:00:00.000Z'
+        )
+        on conflict (id) do nothing;
       `
       );
     },
@@ -175,6 +615,69 @@ export async function createPostgresControlPlaneStorage(
     async getDemoSession() {
       return demoSession;
     },
+    async getWorkspacesForUser(userId) {
+      return sql<Array<{ id: string; name: string; slug: string }>>`
+        select o.id, o.name, o.slug
+        from organizations o
+        join memberships m on m.organization_id = o.id
+        where m.user_id = ${userId}
+        order by o.created_at asc
+      `;
+    },
+    async createWorkspace(input: CreateWorkspaceInput) {
+      const name = input.name.trim();
+      if (!name) {
+        throw new Error("Workspace name is required.");
+      }
+      if (!/^[a-zA-Z0-9][a-zA-Z0-9 _-]*$/.test(name)) {
+        throw new Error("Workspace name may only contain letters, digits, spaces, hyphens, and underscores.");
+      }
+
+      let slug = name
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 32) || "workspace";
+      let suffix = 1;
+
+      while ((await sql<Array<{ id: string }>>`select id from organizations where slug = ${slug} limit 1`).length > 0) {
+        suffix += 1;
+        slug = `${slug}-${suffix}`;
+      }
+
+      const id = `org_${slug.replace(/-/g, "_")}`;
+      const channelId = `chn_${slug.replace(/-/g, "_")}_general`;
+
+      await sql.begin(async (transaction) => {
+        await transaction`
+          insert into users (id, email, password_hash)
+          values (${input.userId}, ${`${input.userId}@workpilot.local`}, 'demo-password')
+          on conflict (id) do nothing
+        `;
+        await transaction`
+          insert into organizations (id, slug, name, description)
+          values (${id}, ${slug}, ${name}, ${input.description?.trim() ?? ""})
+        `;
+        await transaction`
+          insert into memberships (organization_id, user_id, role)
+          values (${id}, ${input.userId}, 'owner')
+        `;
+        await transaction`
+          insert into channels (id, organization_id, type, name, description)
+          values (${channelId}, ${id}, 'group', 'all', 'General collaboration')
+        `;
+        await transaction`
+          insert into channel_participants (channel_id, participant_id, participant_type)
+          values (${channelId}, ${input.userId}, 'user')
+        `;
+      });
+
+      return {
+        id,
+        name,
+        slug
+      };
+    },
     async getOrganization(orgId) {
       return getOrganization(orgId);
     },
@@ -186,6 +689,7 @@ export async function createPostgresControlPlaneStorage(
     },
     async createChannel(input) {
       const name = input.name.trim().toLowerCase();
+      const description = input.description?.trim() ? input.description.trim() : null;
       if (!name) {
         throw new Error("Channel name is required.");
       }
@@ -202,11 +706,28 @@ export async function createPostgresControlPlaneStorage(
         id = `chn_${slug || "channel"}_${suffix}`;
       }
 
-      const [channel] = await sql<Array<{ id: string; type: "group"; name: string }>>`
-        insert into channels (id, organization_id, type, name)
-        values (${id}, ${input.organizationId}, 'group', ${name})
-        returning id, type, name
+      const [channel] = await sql<Array<{ id: string; type: "group"; name: string; description: string | null }>>`
+        insert into channels (id, organization_id, type, name, description)
+        values (${id}, ${input.organizationId}, 'group', ${name}, ${description})
+        returning id, type, name, description
       `;
+
+      const participants = dedupeChannelParticipants([
+        ...(input.actorId ? [{ participantId: input.actorId, participantType: "user" as const }] : []),
+        ...(input.members ?? [])
+      ]);
+
+      if (participants.length > 0) {
+        await sql.begin(async (transaction) => {
+          for (const participant of participants) {
+            await transaction`
+              insert into channel_participants (channel_id, participant_id, participant_type)
+              values (${channel.id}, ${participant.participantId}, ${participant.participantType})
+              on conflict do nothing
+            `;
+          }
+        });
+      }
 
       return {
         ...channel,
@@ -223,47 +744,109 @@ export async function createPostgresControlPlaneStorage(
       return getAgents(orgId);
     },
     async getWorkspaceBootstrap(orgId) {
-      const organization = await getOrganization(orgId);
-      const channels = await getChannels(orgId);
-      const runtimes = await getRuntimes(orgId);
-      const agents = await getAgents(orgId);
-      const issues = await sql<IssueDTO[]>`
-        select
-          id,
-          title,
-          description,
-          status,
-          assignee_id as "assigneeId",
-          creator_id as "creatorId",
-          priority,
-          due_date as "dueDate",
-          project,
-          source_channel_id as "sourceChannelId",
-          created_at as "createdAt",
-          updated_at as "updatedAt"
-        from issues
-        where organization_id = ${orgId}
-        order by created_at asc
+      return buildWorkspaceBootstrap(orgId);
+    },
+    async getWorkspaceBootstrapForRuntime(runtimeId) {
+      const [runtime] = await sql<Array<{ organizationId: string }>>`
+        select organization_id as "organizationId"
+        from runtime_daemons
+        where id = ${runtimeId}
+        limit 1
       `;
-      const messages = await sql<MessageDTO[]>`
-        select id, channel_id as "channelId", content, attachments, sender_id as "senderId", sender_type as "senderType", created_at as "createdAt"
-        from messages
-        where organization_id = ${orgId}
-        order by created_at asc
-      `;
-      const visibleChannelIds = new Set(channels.map((channel) => channel.id));
 
-      return {
-        organization,
-        channels,
-        runtimes,
-        agents,
-        agentActivities: [...(agentActivitiesByOrganization.get(orgId)?.values() ?? [])]
-          .filter((activity) => agents.some((agent) => agent.id === activity.agentId))
-          .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt)),
-        messages: messages.filter((message) => visibleChannelIds.has(message.channelId)),
-        issues
-      } satisfies WorkspaceBootstrapPayload;
+      if (!runtime) {
+        return {
+          organization: null,
+          channels: [],
+          runtimes: [],
+          agents: [],
+          agentActivities: [],
+          agentRunLogs: [],
+          messages: [],
+          issues: [],
+          issueActivities: []
+        } satisfies WorkspaceBootstrapPayload;
+      }
+
+      return buildWorkspaceBootstrap(runtime.organizationId);
+    },
+    async getWorkspaceBootstrapForChannel(channelId) {
+      const [channel] = await sql<Array<{ organizationId: string }>>`
+        select organization_id as "organizationId"
+        from channels
+        where id = ${channelId}
+        limit 1
+      `;
+
+      if (!channel) {
+        return {
+          organization: null,
+          channels: [],
+          runtimes: [],
+          agents: [],
+          agentActivities: [],
+          agentRunLogs: [],
+          messages: [],
+          issues: [],
+          issueActivities: []
+        } satisfies WorkspaceBootstrapPayload;
+      }
+
+      return buildWorkspaceBootstrap(channel.organizationId);
+    },
+    async getAgentIdsForRuntime(runtimeId) {
+      const rows = await sql<Array<{ id: string }>>`
+        select id from agents where runtime_id = ${runtimeId}
+      `;
+      return rows.map((r) => r.id);
+    },
+    async getAgentsForChannel(channelId) {
+      return sql<AgentIdentity[]>`
+        select
+          a.id, a.name, a.description, a.implementation, a.model,
+          a.reasoning_effort as "reasoningEffort", a.status,
+          a.runtime_id as "runtimeId", a.channel_id as "channelId",
+          a.organization_id as "organizationId"
+        from agents a
+        where a.channel_id = ${channelId}
+      `;
+    },
+    async getAgentActivitiesForAgents(agentIds) {
+      if (agentIds.length === 0) return [];
+      // Agent activities are stored in-memory, not in postgres
+      const results: AgentActivityDTO[] = [];
+      for (const [, activities] of agentActivitiesByOrganization) {
+        for (const activity of activities.values()) {
+          if (agentIds.includes(activity.agentId)) {
+            results.push(activity);
+          }
+        }
+      }
+      return results.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+    },
+    async getAgentRunLogsForChannel(channelId, after) {
+      if (after) {
+        return sql<AgentRunLogDTO[]>`
+          select
+            id, agent_id as "agentId", runtime_id as "runtimeId",
+            channel_id as "channelId", issue_id as "issueId",
+            session_id as "sessionId", kind, prompt, response,
+            created_at as "createdAt"
+          from agent_run_logs
+          where channel_id = ${channelId} and created_at > ${after}
+          order by created_at desc
+        `;
+      }
+      return sql<AgentRunLogDTO[]>`
+        select
+          id, agent_id as "agentId", runtime_id as "runtimeId",
+          channel_id as "channelId", issue_id as "issueId",
+          session_id as "sessionId", kind, prompt, response,
+          created_at as "createdAt"
+        from agent_run_logs
+        where channel_id = ${channelId}
+        order by created_at desc
+      `;
     },
     async createRuntimeRegistrationCommand(input) {
       if (input.actorRole !== "owner" && input.actorRole !== "admin") {
@@ -457,7 +1040,7 @@ export async function createPostgresControlPlaneStorage(
       const agentId = createId("agt");
       const channelId = createId("dir");
       const channelName = `Ada x ${input.name}`;
-      const [agent] = await sql<AgentIdentity[]>`
+      const [agent] = await sql<Array<AgentIdentity & { organizationId: string }>>`
         with created_channel as (
           insert into channels (id, organization_id, type, name)
           values (${channelId}, ${runtime.organization_id}, 'direct', ${channelName})
@@ -473,7 +1056,7 @@ export async function createPostgresControlPlaneStorage(
             ${input.name},
             ${input.description},
             ${input.implementation ?? "claude"},
-            ${input.model ?? "claude-sonnet-4.5"},
+            ${input.model ?? "default"},
             ${input.reasoningEffort ?? "medium"},
             'running'
           )
@@ -687,84 +1270,171 @@ export async function createPostgresControlPlaneStorage(
         throw new Error("Source channel was not found.");
       }
       const createdAt = new Date().toISOString();
-      const [issue] = await sql<IssueDTO[]>`
-        insert into issues (
-          id,
-          organization_id,
-          title,
-          description,
-          status,
-          assignee_id,
-          creator_id,
-          priority,
-          due_date,
-          project,
-          source_channel_id,
-          created_at,
-          updated_at
-        )
-        values (
-          ${createId("iss")},
-          ${channel.organization_id},
-          ${input.title},
-          ${input.description},
-          ${input.status ?? "backlog"},
-          ${input.assigneeId},
-          ${input.actorId},
-          ${input.priority ?? "medium"},
-          ${input.dueDate ?? null},
-          ${input.project ?? null},
-          ${input.sourceChannelId ?? null},
-          ${createdAt},
-          ${createdAt}
-        )
-        returning
-          id,
-          title,
-          description,
-          status,
-          assignee_id as "assigneeId",
-          creator_id as "creatorId",
-          priority,
-          due_date as "dueDate",
-          project,
-          source_channel_id as "sourceChannelId",
-          created_at as "createdAt",
-          updated_at as "updatedAt"
-      `;
+      const issueId = createId("iss");
+      const discussionChannelId = createId("ich");
+      const [issue] = await sql.begin(async (transaction) => {
+        await transaction`
+          insert into channels (id, organization_id, type, name, description, created_at)
+          values (${discussionChannelId}, ${channel.organization_id}, 'group', ${`issue-${issueId.slice(-6)}`}, ${'Hidden issue discussion'}, ${createdAt})
+        `;
+        const rows = await transaction<IssueDTO[]>`
+          insert into issues (
+            id,
+            organization_id,
+            title,
+            description,
+            status,
+            assignee_id,
+            creator_id,
+            priority,
+            due_date,
+            project,
+            source_channel_id,
+            discussion_channel_id,
+            created_at,
+            updated_at
+          )
+          values (
+            ${issueId},
+            ${channel.organization_id},
+            ${input.title},
+            ${input.description},
+            ${input.status ?? "backlog"},
+            ${input.assigneeId},
+            ${input.actorId},
+            ${input.priority ?? "medium"},
+            ${input.dueDate ?? null},
+            ${input.project ?? null},
+            ${input.sourceChannelId ?? null},
+            ${discussionChannelId},
+            ${createdAt},
+            ${createdAt}
+          )
+          returning
+            id,
+            title,
+            description,
+            status,
+            assignee_id as "assigneeId",
+            creator_id as "creatorId",
+            priority,
+            due_date as "dueDate",
+            project,
+            source_channel_id as "sourceChannelId",
+            discussion_channel_id as "discussionChannelId",
+            created_at as "createdAt",
+            updated_at as "updatedAt"
+        `;
+        await insertIssueActivity(transaction, {
+          organizationId: channel.organization_id,
+          issueId,
+          actorId: input.actorId,
+          actorType: "user",
+          kind: "created",
+          field: null,
+          fromValue: null,
+          toValue: input.status ?? "backlog",
+          message: input.description || null,
+          createdAt
+        });
+        return rows;
+      });
       return issue;
     },
     async updateIssue(input) {
-      const [issue] = await sql<IssueDTO[]>`
-        update issues
-        set
-          status = coalesce(${input.status ?? null}, status),
-          assignee_id = case when ${input.assigneeId === undefined} then assignee_id else ${input.assigneeId ?? null} end,
-          title = coalesce(${input.title ?? null}, title),
-          description = coalesce(${input.description ?? null}, description),
-          priority = coalesce(${input.priority ?? null}, priority),
-          due_date = case when ${input.dueDate === undefined} then due_date else ${input.dueDate ?? null} end,
-          project = case when ${input.project === undefined} then project else ${input.project ?? null} end,
-          updated_at = now()
+      return await updateIssueWithActivities(sql, input);
+    },
+    async deleteIssue(input) {
+      const [issue] = await sql<Array<{ id: string }>>`
+        delete from issues
         where id = ${input.issueId}
-        returning
-          id,
-          title,
-          description,
-          status,
-          assignee_id as "assigneeId",
-          creator_id as "creatorId",
-          priority,
-          due_date as "dueDate",
-          project,
-          source_channel_id as "sourceChannelId",
-          created_at as "createdAt",
-          updated_at as "updatedAt"
+        returning id
       `;
+
       if (!issue) {
         throw new Error("Issue was not found.");
       }
-      return issue;
+
+      return { issueId: issue.id };
+    },
+    async createIssueComment(input) {
+      const occurredAt = input.occurredAt ?? new Date().toISOString();
+      const [issue] = await sql<Array<{ organizationId: string }>>`
+        select organization_id as "organizationId"
+        from issues
+        where id = ${input.issueId}
+        limit 1
+      `;
+
+      if (!issue) {
+        throw new Error("Issue was not found.");
+      }
+
+      const activityId = createId("isa");
+      await sql.begin(async (transaction) => {
+        await insertIssueActivity(transaction, {
+          id: activityId,
+          organizationId: issue.organizationId,
+          issueId: input.issueId,
+          actorId: input.actorId,
+          actorType: input.actorType,
+          kind: "commented",
+          field: null,
+          fromValue: null,
+          toValue: null,
+          message: input.message.trim(),
+          createdAt: occurredAt
+        });
+        await transaction`
+          update issues
+          set updated_at = ${occurredAt}
+          where id = ${input.issueId}
+        `;
+      });
+
+      return mapIssueActivityRow({
+        id: activityId,
+        issueId: input.issueId,
+        actorId: input.actorId,
+        actorType: input.actorType,
+        kind: "commented",
+        field: null,
+        fromValue: null,
+        toValue: null,
+        message: input.message.trim(),
+        createdAt: occurredAt
+      });
+    },
+    async getIssueActivities(issueId) {
+      const [issue] = await sql<Array<{ organizationId: string }>>`
+        select organization_id as "organizationId"
+        from issues
+        where id = ${issueId}
+        limit 1
+      `;
+
+      if (!issue) {
+        throw new Error("Issue was not found.");
+      }
+
+      const activities = await sql<IssueActivityDTO[]>`
+        select
+          id,
+          issue_id as "issueId",
+          actor_id as "actorId",
+          actor_type as "actorType",
+          kind,
+          field,
+          from_value as "fromValue",
+          to_value as "toValue",
+          message,
+          created_at as "createdAt"
+        from issue_activities
+        where issue_id = ${issueId}
+        order by created_at desc
+      `;
+
+      return activities;
     },
     async createIssueFromMessage(input: CreateIssueFromMessageInput) {
       const [message] = await sql<Array<{ organization_id: string; channel_id: string }>>`
@@ -777,7 +1447,14 @@ export async function createPostgresControlPlaneStorage(
         throw new Error("Source message was not found.");
       }
       const createdAt = new Date().toISOString();
-      const [issue] = await sql<IssueDTO[]>`
+      const issueId = createId("iss");
+      const discussionChannelId = createId("ich");
+      const [issue] = await sql.begin(async (transaction) => {
+        await transaction`
+          insert into channels (id, organization_id, type, name, description, created_at)
+          values (${discussionChannelId}, ${message.organization_id}, 'group', ${`issue-${issueId.slice(-6)}`}, ${'Hidden issue discussion'}, ${createdAt})
+        `;
+        const rows = await transaction<IssueDTO[]>`
         insert into issues (
           id,
           organization_id,
@@ -790,11 +1467,12 @@ export async function createPostgresControlPlaneStorage(
           due_date,
           project,
           source_channel_id,
+          discussion_channel_id,
           created_at,
           updated_at
         )
         values (
-          ${createId("iss")},
+          ${issueId},
           ${message.organization_id},
           ${input.title},
           ${input.description ?? ""},
@@ -805,6 +1483,7 @@ export async function createPostgresControlPlaneStorage(
           ${input.dueDate ?? null},
           ${input.project ?? null},
           ${message.channel_id},
+          ${discussionChannelId},
           ${createdAt},
           ${createdAt}
         )
@@ -819,9 +1498,24 @@ export async function createPostgresControlPlaneStorage(
           due_date as "dueDate",
           project,
           source_channel_id as "sourceChannelId",
+          discussion_channel_id as "discussionChannelId",
           created_at as "createdAt",
           updated_at as "updatedAt"
       `;
+        await insertIssueActivity(transaction, {
+          organizationId: message.organization_id,
+          issueId,
+          actorId: input.actorId,
+          actorType: "user",
+          kind: "created",
+          field: null,
+          fromValue: null,
+          toValue: input.assigneeId ? "todo" : "backlog",
+          message: input.description?.trim() || null,
+          createdAt
+        });
+        return rows;
+      });
       return issue;
     },
     async createIssueFromMessages(input: CreateIssueFromMessagesInput) {
@@ -845,7 +1539,14 @@ export async function createPostgresControlPlaneStorage(
       }
 
       const createdAt = new Date().toISOString();
-      const [issue] = await sql<IssueDTO[]>`
+      const issueId = createId("iss");
+      const discussionChannelId = createId("ich");
+      const [issue] = await sql.begin(async (transaction) => {
+        await transaction`
+          insert into channels (id, organization_id, type, name, description, created_at)
+          values (${discussionChannelId}, ${firstMessage.organization_id}, 'group', ${`issue-${issueId.slice(-6)}`}, ${'Hidden issue discussion'}, ${createdAt})
+        `;
+        const rows = await transaction<IssueDTO[]>`
         insert into issues (
           id,
           organization_id,
@@ -858,11 +1559,12 @@ export async function createPostgresControlPlaneStorage(
           due_date,
           project,
           source_channel_id,
+          discussion_channel_id,
           created_at,
           updated_at
         )
         values (
-          ${createId("iss")},
+          ${issueId},
           ${firstMessage.organization_id},
           ${input.title},
           ${input.description},
@@ -873,6 +1575,7 @@ export async function createPostgresControlPlaneStorage(
           ${input.dueDate ?? null},
           ${input.project ?? null},
           ${firstMessage.channel_id},
+          ${discussionChannelId},
           ${createdAt},
           ${createdAt}
         )
@@ -887,15 +1590,31 @@ export async function createPostgresControlPlaneStorage(
           due_date as "dueDate",
           project,
           source_channel_id as "sourceChannelId",
+          discussion_channel_id as "discussionChannelId",
           created_at as "createdAt",
           updated_at as "updatedAt"
       `;
+        await insertIssueActivity(transaction, {
+          organizationId: firstMessage.organization_id,
+          issueId,
+          actorId: input.actorId,
+          actorType: "user",
+          kind: "created",
+          field: null,
+          fromValue: null,
+          toValue: input.assigneeId ? "todo" : "backlog",
+          message: input.description?.trim() || null,
+          createdAt
+        });
+        return rows;
+      });
       return issue;
     },
     async pullRuntimeIssues(input) {
       const claimedIssues = await sql<
         Array<
           IssueDTO & {
+            organizationId: string;
             agentId: string;
             agentChannelId: string;
             agentName: string;
@@ -923,6 +1642,7 @@ export async function createPostgresControlPlaneStorage(
           where i.id in (select id from candidate_issues)
           returning
             i.id,
+            i.organization_id as "organizationId",
             i.title,
             i.description,
             i.status,
@@ -954,9 +1674,47 @@ export async function createPostgresControlPlaneStorage(
         return [];
       }
 
+      for (const issue of claimedIssues) {
+        await insertIssueActivity(sql, {
+          organizationId: issue.organizationId,
+          issueId: issue.id,
+          actorId: issue.assigneeId ?? input.runtimeId,
+          actorType: issue.assigneeId ? "agent" : "system",
+          kind: "status_changed",
+          field: "status",
+          fromValue: "todo",
+          toValue: "in_progress",
+          message: "Claimed from the runtime issue queue.",
+          createdAt: issue.updatedAt
+        });
+      }
+
       const sourceChannelIds = [
         ...new Set(claimedIssues.map((issue) => issue.sourceChannelId).filter((channelId): channelId is string => Boolean(channelId)))
       ];
+      const claimedIssueIds = claimedIssues.map((issue) => issue.id);
+      const issueActivities = await sql<IssueActivityDTO[]>`
+        select
+          id,
+          issue_id as "issueId",
+          actor_id as "actorId",
+          actor_type as "actorType",
+          kind,
+          field,
+          from_value as "fromValue",
+          to_value as "toValue",
+          message,
+          created_at as "createdAt"
+        from issue_activities
+        where issue_id = any(${toPostgresTextArray(claimedIssueIds)}::text[])
+        order by created_at asc
+      `;
+      const issueActivitiesByIssueId = new Map<string, IssueActivityDTO[]>();
+      for (const activity of issueActivities) {
+        const current = issueActivitiesByIssueId.get(activity.issueId) ?? [];
+        current.push(activity);
+        issueActivitiesByIssueId.set(activity.issueId, current);
+      }
       const sourceMessages = await sql<MessageDTO[]>`
         select id, channel_id as "channelId", content, attachments, sender_id as "senderId", sender_type as "senderType", created_at as "createdAt"
         from messages
@@ -996,7 +1754,8 @@ export async function createPostgresControlPlaneStorage(
           reasoningEffort: issue.agentReasoningEffort,
           status: issue.agentStatus
         },
-        sourceMessages: issue.sourceChannelId ? (sourceMessagesByChannelId.get(issue.sourceChannelId) ?? []) : []
+        sourceMessages: issue.sourceChannelId ? (sourceMessagesByChannelId.get(issue.sourceChannelId) ?? []) : [],
+        issueActivities: issueActivitiesByIssueId.get(issue.id) ?? []
       }));
     },
     async recordAgentIssueEvent(input) {
@@ -1004,6 +1763,7 @@ export async function createPostgresControlPlaneStorage(
       const [agent] = await sql<AgentIdentity[]>`
         select
           id,
+          organization_id as "organizationId",
           runtime_id as "runtimeId",
           channel_id as "channelId",
           name,
@@ -1024,9 +1784,31 @@ export async function createPostgresControlPlaneStorage(
       let message: MessageDTO | null = null;
 
       await sql.begin(async (transaction) => {
+        const [currentIssue] = await transaction<IssueDTO[]>`
+          select
+            id,
+            title,
+            description,
+            status,
+            assignee_id as "assigneeId",
+            creator_id as "creatorId",
+            priority,
+            due_date as "dueDate",
+            project,
+            source_channel_id as "sourceChannelId",
+            created_at as "createdAt",
+            updated_at as "updatedAt"
+          from issues
+          where id = ${input.issueId}
+          limit 1
+        `;
+        if (!currentIssue) {
+          throw new Error("Issue was not found.");
+        }
+
         const [updatedIssue] = await transaction<IssueDTO[]>`
           update issues
-          set status = ${input.status}
+          set status = ${input.status}, updated_at = ${occurredAt}
           where id = ${input.issueId}
           returning
             id,
@@ -1042,15 +1824,38 @@ export async function createPostgresControlPlaneStorage(
             created_at as "createdAt",
             updated_at as "updatedAt"
         `;
-        if (!updatedIssue) {
-          throw new Error("Issue was not found.");
+        if (currentIssue.status !== updatedIssue.status) {
+          await insertIssueActivity(transaction, {
+            organizationId: agent.organizationId,
+            issueId: input.issueId,
+            actorId: input.agentId,
+            actorType: "agent",
+            kind: "status_changed",
+            field: "status",
+            fromValue: currentIssue.status,
+            toValue: updatedIssue.status,
+            message: null,
+            createdAt: occurredAt
+          });
         }
         issue = updatedIssue;
 
         if (input.message && input.message.trim().length > 0) {
+          await insertIssueActivity(transaction, {
+            organizationId: agent.organizationId,
+            issueId: input.issueId,
+            actorId: input.agentId,
+            actorType: "agent",
+            kind: "commented",
+            field: null,
+            fromValue: null,
+            toValue: null,
+            message: input.message.trim(),
+            createdAt: occurredAt
+          });
           const [createdMessage] = await transaction<MessageDTO[]>`
             insert into messages (id, organization_id, channel_id, sender_id, sender_type, content, attachments, created_at)
-            select ${createId("msg")}, organization_id, coalesce(source_channel_id, ${agent.channelId}), ${input.agentId}, 'agent', ${input.message.trim()}, '[]'::jsonb, ${occurredAt}
+            select ${createId("msg")}, organization_id, discussion_channel_id, ${input.agentId}, 'agent', ${input.message.trim()}, '[]'::jsonb, ${occurredAt}
             from issues
             where id = ${input.issueId}
             returning id, channel_id as "channelId", content, attachments, sender_id as "senderId", sender_type as "senderType", created_at as "createdAt"
@@ -1091,6 +1896,157 @@ export async function createPostgresControlPlaneStorage(
         activity
       };
     },
+    async recordAgentRunLog(input) {
+      const occurredAt = input.occurredAt ?? new Date().toISOString();
+      const [agent] = await sql<Array<{ id: string; organizationId: string }>>`
+        select id, organization_id as "organizationId"
+        from agents
+        where id = ${input.agentId}
+          and status <> 'deleted'
+        limit 1
+      `;
+      if (!agent) {
+        throw new Error("Agent was not found.");
+      }
+
+      const [log] = await sql<AgentRunLogDTO[]>`
+        insert into agent_run_logs (
+          id,
+          organization_id,
+          runtime_id,
+          agent_id,
+          channel_id,
+          issue_id,
+          session_id,
+          kind,
+          prompt,
+          response,
+          created_at
+        )
+        values (
+          ${createId("arl")},
+          ${agent.organizationId},
+          ${input.runtimeId},
+          ${input.agentId},
+          ${input.channelId ?? null},
+          ${input.issueId ?? null},
+          ${input.sessionId},
+          ${input.kind},
+          ${input.prompt},
+          ${input.response},
+          ${occurredAt}
+        )
+        returning
+          id,
+          agent_id as "agentId",
+          runtime_id as "runtimeId",
+          channel_id as "channelId",
+          issue_id as "issueId",
+          session_id as "sessionId",
+          kind,
+          prompt,
+          response,
+          created_at as "createdAt"
+      `;
+
+      return {
+        log
+      };
+    },
+    async syncAgentWorkspaceFiles(input) {
+      const [agent] = await sql<Array<{ id: string; organizationId: string }>>`
+        select id, organization_id as "organizationId"
+        from agents
+        where id = ${input.agentId}
+          and status <> 'deleted'
+        limit 1
+      `;
+      if (!agent) {
+        throw new Error("Agent was not found.");
+      }
+
+      await sql`
+        delete from agent_workspace_files
+        where agent_id = ${input.agentId}
+      `;
+
+      for (const file of input.files) {
+        await sql`
+          insert into agent_workspace_files (
+            agent_id,
+            organization_id,
+            path,
+            content,
+            size,
+            updated_at
+          )
+          values (
+            ${input.agentId},
+            ${agent.organizationId},
+            ${file.path},
+            ${file.content},
+            ${file.size},
+            ${file.updatedAt}
+          )
+        `;
+      }
+
+      return {
+        files: input.files
+          .map(({ content: _content, ...file }) => file)
+          .sort((left, right) => left.path.localeCompare(right.path))
+      };
+    },
+    async listAgentWorkspaceFiles(agentId) {
+      const [agent] = await sql<Array<{ id: string }>>`
+        select id
+        from agents
+        where id = ${agentId}
+          and status <> 'deleted'
+        limit 1
+      `;
+      if (!agent) {
+        throw new Error("Agent was not found.");
+      }
+
+      return await sql<Array<{ path: string; kind: "file"; size: number; updatedAt: string }>>`
+        select
+          path,
+          'file' as kind,
+          size,
+          updated_at as "updatedAt"
+        from agent_workspace_files
+        where agent_id = ${agentId}
+        order by path asc
+      `;
+    },
+    async getAgentWorkspaceFile(agentId, path) {
+      const [agent] = await sql<Array<{ id: string }>>`
+        select id
+        from agents
+        where id = ${agentId}
+          and status <> 'deleted'
+        limit 1
+      `;
+      if (!agent) {
+        throw new Error("Agent was not found.");
+      }
+
+      const [file] = await sql<AgentWorkspaceFileContentDTO[]>`
+        select
+          path,
+          'file' as kind,
+          size,
+          updated_at as "updatedAt",
+          content
+        from agent_workspace_files
+        where agent_id = ${agentId}
+          and path = ${path}
+        limit 1
+      `;
+
+      return file ?? null;
+    },
     async pullRuntimeAgentMessages(input) {
       const claimedAt = input.occurredAt ?? new Date().toISOString();
       const claims = await sql<
@@ -1126,8 +2082,11 @@ export async function createPostgresControlPlaneStorage(
           join channels c on c.id = m.channel_id
           where a.runtime_id = ${input.runtimeId}
             and a.status = 'running'
-            and c.type = 'direct'
             and m.sender_type = 'user'
+            and (
+              c.type = 'direct'
+              or strpos(lower(m.content), lower(concat('@', a.name))) > 0
+            )
             and not exists (
               select 1
               from agent_message_claims amc
@@ -1254,11 +2213,36 @@ export async function createPostgresControlPlaneStorage(
 
       let response: MessageDTO | null = null;
       await sql.begin(async (transaction) => {
+        const [sourceContext] = await transaction<Array<{
+          organizationId: string;
+          channelId: string;
+          channelType: "group" | "direct";
+          senderDisplayName: string;
+        }>>`
+          select
+            m.organization_id as "organizationId",
+            m.channel_id as "channelId",
+            c.type as "channelType",
+            case
+              when m.sender_type = 'agent' then coalesce(a.name, m.sender_id)
+              else coalesce(split_part(u.email, '@', 1), m.sender_id)
+            end as "senderDisplayName"
+          from messages m
+          join channels c on c.id = m.channel_id
+          left join users u on m.sender_type = 'user' and u.id = m.sender_id
+          left join agents a on m.sender_type = 'agent' and a.id = m.sender_id
+          where m.id = ${input.sourceMessageId}
+          limit 1
+        `;
+
+        const responseContent =
+          sourceContext?.channelType === "group"
+            ? prefixMentionedReply(input.content, sourceContext.senderDisplayName)
+            : input.content;
+
         const [createdMessage] = await transaction<MessageDTO[]>`
           insert into messages (id, organization_id, channel_id, sender_id, sender_type, content, attachments, created_at)
-          select ${createId("msg")}, m.organization_id, m.channel_id, ${input.agentId}, 'agent', ${input.content}, '[]'::jsonb, ${occurredAt}
-          from messages m
-          where m.id = ${input.sourceMessageId}
+          values (${createId("msg")}, ${sourceContext?.organizationId ?? null}, ${sourceContext?.channelId ?? null}, ${input.agentId}, 'agent', ${responseContent}, '[]'::jsonb, ${occurredAt})
           returning id, channel_id as "channelId", content, attachments, sender_id as "senderId", sender_type as "senderType", created_at as "createdAt"
         `;
         response = createdMessage ?? null;
@@ -1273,6 +2257,234 @@ export async function createPostgresControlPlaneStorage(
       return {
         message: response!
       };
+    },
+    async getWorkspacePermissions(orgId: string, userId?: string) {
+      const rows = userId
+        ? await sql`select * from workspace_permissions where organization_id = ${orgId} and user_id = ${userId}`
+        : await sql`select * from workspace_permissions where organization_id = ${orgId}`;
+      
+      return rows.map((row: {
+        id: string;
+        organization_id: string;
+        user_id: string;
+        resource_type: "runtime" | "agent" | "channel";
+        resource_id: string;
+        permission: "read" | "write" | "admin";
+        created_at: string;
+        created_by: string;
+      }) => ({
+        id: row.id,
+        organizationId: row.organization_id,
+        userId: row.user_id,
+        resourceType: row.resource_type,
+        resourceId: row.resource_id,
+        permission: row.permission,
+        createdAt: row.created_at,
+        createdBy: row.created_by
+      }));
+    },
+    async grantPermission(input) {
+      const [result] = await sql<Array<{
+        id: string;
+        organization_id: string;
+        user_id: string;
+        resource_type: "runtime" | "agent" | "channel";
+        resource_id: string;
+        permission: "read" | "write" | "admin";
+        created_at: string;
+        created_by: string;
+      }>>`insert into workspace_permissions (id, organization_id, user_id, resource_type, resource_id, permission, created_at, created_by)
+        values (${createId("perm")}, ${input.organizationId}, ${input.userId}, ${input.resourceType}, ${input.resourceId}, ${input.permission}, ${new Date().toISOString()}, ${input.grantedBy})
+        on conflict (organization_id, user_id, resource_type, resource_id, permission) do nothing
+        returning *`;
+      
+      return result ? {
+        id: result.id,
+        organizationId: result.organization_id,
+        userId: result.user_id,
+        resourceType: result.resource_type,
+        resourceId: result.resource_id,
+        permission: result.permission,
+        createdAt: result.created_at,
+        createdBy: result.created_by
+      } : {
+        id: "",
+        organizationId: input.organizationId,
+        userId: input.userId,
+        resourceType: input.resourceType,
+        resourceId: input.resourceId,
+        permission: input.permission,
+        createdAt: new Date().toISOString(),
+        createdBy: input.grantedBy
+      };
+    },
+    async revokePermission(input) {
+      await sql`delete from workspace_permissions where id = ${input.permissionId}`;
+    },
+    async getWorkspaceInvitations(orgId: string) {
+      const result = await sql<Array<{
+        id: string;
+        organization_id: string;
+        email: string;
+        role: "owner" | "admin" | "member";
+        invited_by: string;
+        token: string;
+        expires_at: string;
+        accepted_at: string | null;
+        created_at: string;
+      }>>`select * from workspace_invitations where organization_id = ${orgId}`;
+      
+      return result.map((row) => ({
+        id: row.id,
+        organizationId: row.organization_id,
+        email: row.email,
+        role: row.role,
+        invitedBy: row.invited_by,
+        token: row.token,
+        expiresAt: row.expires_at,
+        acceptedAt: row.accepted_at,
+        createdAt: row.created_at
+      }));
+    },
+    async createWorkspaceInvitation(input) {
+      const ttlMs = input.ttlMs ?? 7 * 24 * 60 * 60 * 1000;
+      const [result] = await sql<Array<{
+        id: string;
+        organization_id: string;
+        email: string;
+        role: "owner" | "admin" | "member";
+        invited_by: string;
+        token: string;
+        expires_at: string;
+        accepted_at: string | null;
+        created_at: string;
+      }>>`insert into workspace_invitations (id, organization_id, email, role, invited_by, token, expires_at, created_at)
+        values (${createId("inv")}, ${input.organizationId}, ${input.email}, ${input.role}, ${input.invitedBy}, ${createSecret("invite")}, ${new Date(Date.now() + ttlMs).toISOString()}, ${new Date().toISOString()})
+        returning *`;
+      
+      return {
+        id: result.id,
+        organizationId: result.organization_id,
+        email: result.email,
+        role: result.role,
+        invitedBy: result.invited_by,
+        token: result.token,
+        expiresAt: result.expires_at,
+        acceptedAt: result.accepted_at,
+        createdAt: result.created_at
+      };
+    },
+    async acceptWorkspaceInvitation(token: string, userId: string) {
+      const [result] = await sql<Array<{ id: string }>>`select id from workspace_invitations where token = ${token}`;
+      if (!result) {
+        throw new Error("Invalid invitation token.");
+      }
+      await sql`update workspace_invitations set accepted_at = ${new Date().toISOString()} where token = ${token}`;
+    },
+    async getOrganizationMembers(orgId: string) {
+      const result = await sql<Array<{
+        user_id: string;
+        email: string;
+        role: "owner" | "admin" | "member";
+      }>>`select user_id, u.email as email, role from memberships m join users u on u.id = m.user_id where organization_id = ${orgId}`;
+      
+      return result.map((row) => ({
+        userId: row.user_id,
+        email: row.email,
+        role: row.role
+      }));
+    },
+    async getChannelParticipants(channelId) {
+      const participants = await sql<Array<{
+        participantId: string;
+        participantType: "user" | "agent";
+        displayName: string | null;
+        email: string | null;
+        role: "owner" | "admin" | "member" | null;
+        agentStatus: "running" | "stopped" | "deleted" | null;
+      }>>`
+        select
+          cp.participant_id as "participantId",
+          cp.participant_type as "participantType",
+          case
+            when cp.participant_type = 'agent' then a.name
+            else split_part(u.email, '@', 1)
+          end as "displayName",
+          u.email as email,
+          m.role as role,
+          a.status as "agentStatus"
+        from channel_participants cp
+        left join users u
+          on cp.participant_type = 'user'
+         and u.id = cp.participant_id
+        left join memberships m
+          on cp.participant_type = 'user'
+         and m.user_id = cp.participant_id
+         and m.organization_id = (select organization_id from channels where id = ${channelId} limit 1)
+        left join agents a
+          on cp.participant_type = 'agent'
+         and a.id = cp.participant_id
+        where cp.channel_id = ${channelId}
+        order by cp.participant_type desc, "displayName" asc nulls last
+      `;
+
+      if (participants.length === 0) {
+        const [channel] = await sql<Array<{ id: string }>>`select id from channels where id = ${channelId} limit 1`;
+        if (!channel) {
+          throw new Error("Channel not found.");
+        }
+      }
+
+      return participants.map<ChannelParticipantDTO>((participant) => ({
+        participantId: participant.participantId,
+        participantType: participant.participantType,
+        displayName: participant.displayName ?? participant.participantId,
+        email: participant.email,
+        role: participant.role,
+        agentStatus: participant.agentStatus
+      }));
+    },
+    async updateChannel(input: UpdateChannelInput) {
+      const name = input.name.trim().toLowerCase();
+      const description = input.description?.trim() ? input.description.trim() : null;
+
+      if (!name) {
+        throw new Error("Channel name is required.");
+      }
+
+      const [existingChannel] = await sql<Array<{ id: string; name: string }>>`
+        select id, name
+        from channels
+        where id = ${input.channelId}
+        limit 1
+      `;
+
+      if (!existingChannel) {
+        throw new Error("Channel not found.");
+      }
+
+      if (existingChannel.id === 'chn_general' && existingChannel.name !== name) {
+        throw new Error("The #all channel cannot be renamed.");
+      }
+
+      const [channel] = await sql<Array<{ id: string; type: "group" | "direct"; name: string; description: string | null }>>`
+        update channels
+        set name = ${name},
+            description = ${description}
+        where id = ${input.channelId}
+        returning id, type, name, description
+      `;
+
+      return channel!;
+    },
+    async getPendingAgentResponses(agentId: string) {
+      return [];
+    },
+    async claimAgentResponse(responseId: string, agentId: string) {
+      throw new Error("Not implemented in Postgres.");
+    },
+    async completeAgentResponse(responseId: string) {
+      throw new Error("Not implemented in Postgres.");
     }
   };
 }

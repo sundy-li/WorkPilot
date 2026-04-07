@@ -11,6 +11,7 @@ export function getAgentActivityBadge(input: GetAgentActivityBadgeInput) {
     return {
       tone: "neutral" as StatusTone,
       label: "idle",
+      presenceLabel: "Idle",
       summary: `${capitalizeImplementation(input.implementation)} is connected and waiting for the next instruction.`,
       detail: null
     };
@@ -19,6 +20,7 @@ export function getAgentActivityBadge(input: GetAgentActivityBadgeInput) {
   return {
     tone: input.activity.status === "running" ? ("warning" as StatusTone) : ("neutral" as StatusTone),
     label: input.activity.status,
+    presenceLabel: input.activity.status === "running" ? "Typing..." : "Idle",
     summary: input.activity.summary,
     detail: input.activity.detail
   };
