@@ -3976,7 +3976,7 @@ export function App() {
                     </Button>
                   </div>
                 </div>
-                <div className="mt-4 flex flex-col gap-3 rounded-[1.15rem] bg-[linear-gradient(180deg,rgba(248,250,252,0.86)_0%,rgba(255,255,255,0.96)_100%)] p-3 ring-1 ring-neutral-200/80 lg:flex-row lg:items-center lg:justify-between">
+                <div className="mt-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                   <div className="flex items-center gap-2 text-neutral-500">
                     <SlidersHorizontal className="size-4" />
                     <span className="font-mono text-[11px] font-semibold uppercase tracking-[0.16em]">Board Filters</span>
@@ -4020,29 +4020,22 @@ export function App() {
 
               <div className="min-h-0 flex-1 overflow-x-auto overflow-y-hidden p-4 lg:p-5">
                 <div className="grid h-full min-w-[1500px] grid-cols-5 gap-4">
-                  {([
-                    { id: "backlog", label: "Backlog", tone: "neutral" as const, helper: "Ready for product grooming" },
-                    { id: "todo", label: "Todo", tone: "neutral" as const, helper: "Ready for iteration planning" },
-                    { id: "in_progress", label: "In Progress", tone: "warning" as const, helper: "Active development only" },
-                    { id: "in_review", label: "In Review", tone: "warning" as const, helper: "Review, test, and acceptance" },
-                    { id: "done", label: "Done", tone: "success" as const, helper: "Merged, deployed, accepted" }
-                  ] as Array<{
-                    id: IssueDTO["status"];
-                    label: string;
-                    tone: "neutral" | "warning" | "success";
-                    helper: string;
-                  }>).map((lane) => {
+                  {getStatusLaneConfigs().map((lane) => {
                     const laneIssues = filteredKanbanIssues.filter((issue) => issue.status === lane.id);
                     const isDropActive = kanbanDropLane === lane.id;
 
                     return (
                       <section
                         key={lane.id}
-                        className={`flex min-h-0 flex-col rounded-[1.35rem] p-3 ring-1 shadow-[0_14px_28px_rgba(15,23,42,0.04)] transition ${
+                        className={`flex min-h-0 flex-col rounded-2xl border-l-[3px] p-3 transition ${
                           isDropActive
-                            ? "bg-[linear-gradient(180deg,rgba(79,70,229,0.08)_0%,rgba(255,255,255,0.98)_100%)] ring-[color:color-mix(in_srgb,var(--accent)_30%,white)]"
-                            : "bg-[var(--panel-elevated)] ring-neutral-200/80"
+                            ? "ring-2 ring-[color:color-mix(in_srgb,var(--accent)_30%,white)]"
+                            : ""
                         }`}
+                        style={{
+                          borderLeftColor: lane.color,
+                          backgroundColor: lane.laneBg,
+                        }}
                         onDragOver={(event) => {
                           event.preventDefault();
                           if (kanbanDropLane !== lane.id) {
@@ -4065,38 +4058,32 @@ export function App() {
                           void handleMoveIssue(issueId, lane.id);
                         }}
                       >
-                        <div className="mb-3 rounded-[1rem] bg-white/74 px-3 py-3 ring-1 ring-neutral-200/70">
-                          <div className="flex items-center justify-between gap-3">
-                            <div className="flex items-center gap-3">
-                              <span
-                                className={`inline-flex min-w-10 items-center justify-center rounded-full px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] ${
-                                  lane.tone === "success"
-                                    ? "bg-emerald-100 text-emerald-700"
-                                    : lane.tone === "warning"
-                                      ? "bg-amber-100 text-amber-700"
-                                      : "bg-slate-100 text-slate-700"
-                                }`}
-                              >
-                                {laneIssues.length}
-                              </span>
-                              <div>
-                                <p className="text-sm font-semibold text-neutral-950">{lane.label}</p>
-                                <p className="mt-1 text-xs text-neutral-500">{isDropActive ? "Drop here to move issue" : lane.helper}</p>
-                              </div>
-                            </div>
-                            <button
-                              className="panel-control flex size-9 items-center justify-center rounded-xl text-neutral-700"
-                              onClick={() => handleOpenIssueCreateModal(lane.id)}
-                              type="button"
-                            >
-                              <Plus className="size-4" />
-                            </button>
+                        <div className="mb-3 flex items-center gap-2.5 px-1 py-2">
+                          <StatusLaneIcon config={lane} />
+                          <div className="min-w-0 flex-1">
+                            <p className="text-sm font-bold text-neutral-950">{lane.label}</p>
+                            <p className="text-[11px]" style={{ color: lane.badgeText }}>
+                              {isDropActive ? "Drop here to move issue" : lane.helper}
+                            </p>
                           </div>
+                          <span
+                            className="inline-flex min-w-7 items-center justify-center rounded-full px-2 py-0.5 text-[11px] font-bold"
+                            style={{ backgroundColor: lane.badgeBg, color: lane.badgeText }}
+                          >
+                            {laneIssues.length}
+                          </span>
+                          <button
+                            className="panel-control flex size-8 items-center justify-center rounded-lg text-neutral-600"
+                            onClick={() => handleOpenIssueCreateModal(lane.id)}
+                            type="button"
+                          >
+                            <Plus className="size-3.5" />
+                          </button>
                         </div>
 
                         <div className="min-h-0 flex-1 overflow-y-auto">
                           {laneIssues.length === 0 ? (
-                            <div className="flex h-full min-h-[240px] items-center justify-center rounded-[1.1rem] bg-white/68 p-6 text-center ring-1 ring-dashed ring-neutral-200/75">
+                            <div className="flex h-full min-h-[240px] items-center justify-center rounded-xl bg-white/60 p-6 text-center" style={{ border: `1px dashed ${lane.cardBorder}` }}>
                               <div>
                                 <p className="text-sm font-medium text-neutral-900">No issues in {lane.label}</p>
                                 <p className="mt-2 text-xs leading-5 text-neutral-500">
@@ -4109,11 +4096,12 @@ export function App() {
                               {laneIssues.map((issue) => (
                                 <article
                                   key={issue.id}
-                                  className={`rounded-[1.1rem] bg-white/84 p-4 ring-1 ring-neutral-200/80 shadow-[0_10px_24px_rgba(15,23,42,0.04)] transition ${
+                                  className={`group rounded-xl bg-white p-3.5 shadow-[0_1px_3px_rgba(0,0,0,0.06)] transition ${
                                     draggingIssueId === issue.id
                                       ? "scale-[0.98] rotate-[1deg] opacity-60"
-                                      : "cursor-grab hover:-translate-y-0.5 hover:bg-white hover:ring-neutral-300 hover:shadow-[0_16px_30px_rgba(15,23,42,0.06)]"
+                                      : "cursor-grab hover:-translate-y-0.5 hover:shadow-[0_4px_12px_rgba(0,0,0,0.08)]"
                                   }`}
+                                  style={{ borderWidth: 1, borderStyle: "solid", borderColor: lane.cardBorder }}
                                   draggable
                                   onClick={() => handleOpenIssueWorkspace(issue.id)}
                                   onDragStart={(event) => {
@@ -4126,58 +4114,59 @@ export function App() {
                                     setKanbanDropLane(null);
                                   }}
                                 >
-                                  <div className="flex items-start justify-between gap-3">
-                                    <div className="flex min-w-0 items-start gap-2">
-                                      <span className="mt-0.5 text-neutral-300">
-                                        <GripVertical className="size-4" />
-                                      </span>
-                                      <div className="min-w-0">
-                                        <p className="truncate text-sm font-semibold text-neutral-950">{issue.title}</p>
-                                        <div className="mt-2 flex flex-wrap items-center gap-2">
-                                          <StatusPill tone={lane.tone}>{issue.priority}</StatusPill>
-                                        </div>
-                                      </div>
-                                    </div>
+                                  <div className="flex items-center gap-2">
+                                    <div
+                                      className="size-2 shrink-0 rounded-full"
+                                      style={{
+                                        backgroundColor: lane.color,
+                                        boxShadow: `0 0 0 3px ${lane.dotGlow}`,
+                                      }}
+                                    />
+                                    <p className="min-w-0 flex-1 truncate text-sm font-semibold text-neutral-950">
+                                      {issue.title}
+                                    </p>
                                     {issue.assigneeId ? (
                                       <div
-                                        className="flex size-8 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold"
+                                        className="flex size-6 shrink-0 items-center justify-center rounded-full text-[10px] font-bold"
                                         style={{
                                           backgroundColor: getAvatarPalette(issue.assigneeId).background,
-                                          color: getAvatarPalette(issue.assigneeId).foreground
+                                          color: getAvatarPalette(issue.assigneeId).foreground,
                                         }}
                                       >
                                         {getAvatarInitials(
-                                          workspace?.agents.find((agent) => agent.id === issue.assigneeId)?.name ?? issue.assigneeId
+                                          workspace?.agents.find((a) => a.id === issue.assigneeId)?.name ?? issue.assigneeId
                                         )}
                                       </div>
                                     ) : null}
                                   </div>
-                                  <p className="mt-3 line-clamp-3 text-sm leading-6 text-neutral-600">
+                                  <p className="mt-2 line-clamp-2 text-[12.5px] leading-[1.55] text-neutral-500">
                                     {issue.description || "No description yet."}
                                   </p>
-                                  <div className="mt-4 flex items-center justify-between gap-3 text-xs text-neutral-500">
-                                    <span className="truncate">
-                                      {issue.assigneeId
-                                        ? workspace?.agents.find((agent) => agent.id === issue.assigneeId)?.name ?? "Assigned"
-                                        : "Unassigned"}
+                                  <div className="mt-3 flex items-center gap-2">
+                                    <span
+                                      className="rounded-md px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide"
+                                      style={{
+                                        backgroundColor: getPriorityColor(issue.priority).bg,
+                                        color: getPriorityColor(issue.priority).text,
+                                      }}
+                                    >
+                                      {issue.priority}
                                     </span>
-                                    <div className="flex items-center gap-3">
-                                      <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
-                                        <CalendarDays className="size-3.5" />
-                                        {issue.dueDate ? formatTimestamp(issue.dueDate) : "No due date"}
-                                      </span>
-                                      <button
-                                        className="inline-flex items-center gap-1 rounded-full bg-rose-50 px-2.5 py-1 text-[11px] font-medium text-rose-700 transition hover:bg-rose-100"
-                                        onClick={(event) => {
-                                          event.stopPropagation();
-                                          void handleDeleteIssue(issue.id);
-                                        }}
-                                        type="button"
-                                      >
-                                        <Trash2 className="size-3" />
-                                        Delete
-                                      </button>
-                                    </div>
+                                    <span className="ml-auto flex items-center gap-1 text-[11px] text-neutral-400">
+                                      <CalendarDays className="size-3" />
+                                      {issue.dueDate ? formatTimestamp(issue.dueDate) : "No date"}
+                                    </span>
+                                    <button
+                                      className="inline-flex items-center gap-1 rounded-md bg-rose-50 px-2 py-0.5 text-[10px] font-medium text-rose-600 opacity-0 transition hover:bg-rose-100 group-hover:opacity-100"
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        void handleDeleteIssue(issue.id);
+                                      }}
+                                      type="button"
+                                    >
+                                      <Trash2 className="size-2.5" />
+                                      Delete
+                                    </button>
                                   </div>
                                 </article>
                               ))}
